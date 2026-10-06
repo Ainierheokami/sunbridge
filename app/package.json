@@ -1,0 +1,15 @@
+{
+  "name": "sunbridge",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Stream a Sunshine host to the browser through a local bridge",
+  "license": "GPL-3.0-only",
+  "homepage": "https://github.com/Ainierheokami/sunbridge",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "passwd": "node scripts/passwd.mjs"
+  }
+}

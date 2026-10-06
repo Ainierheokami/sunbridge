@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#081017" />
+  <meta name="description" content="Sunbridge — stream a Sunshine host to your browser." />
+  <title>Sunbridge / Web Client</title>
+  <link rel="icon" type="image/svg+xml" href="assets/sunbridge-icon.svg" />
+  <link rel="stylesheet" href="styles.css?v=20260930" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation" data-i18n-aria-label="aria.navigation">
+      <div class="brand-lockup">
+        <div class="brand-mark-wrap">
+          <img class="brand-mark" src="assets/sunbridge-icon.svg" alt="Sunbridge" />
+          <span class="brand-pulse" aria-hidden="true"></span>
+        </div>
+        <div>
+          <div class="brand-name">SUNBRIDGE</div>
+          <div class="brand-subtitle">WEB CLIENT / 0.1</div>
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <nav class="nav-stack">
+        <span class="nav-label">WORKSPACE</span>
+        <button class="nav-item is-active" type="button" aria-label="Overview" data-i18n-aria-label="nav.overview" data-view-target="overview">
+          <span class="nav-icon" aria-hidden="true" data-icon="grid"></span>
+          <span>Overview</span>
+          <span class="nav-shortcut">01</span>
+        </button>
+        <button class="nav-item" type="button" aria-label="Hosts" data-i18n-aria-label="nav.hosts" data-view-target="hosts">
+          <span class="nav-icon" aria-hidden="true" data-icon="host"></span>
+          <span>Hosts</span>
+          <span class="nav-count">—</span>
+        </button>
+        <button class="nav-item" type="button" aria-label="Network path" data-i18n-aria-label="nav.network" data-view-target="network">
+          <span class="nav-icon" aria-hidden="true" data-icon="pulse"></span>
+          <span>Network path</span>
+        </button>
+
+        <span class="nav-label nav-label-spaced">PREFERENCES</span>
+        <button class="nav-item" type="button" aria-label="Settings" data-i18n-aria-label="nav.settings" data-view-target="settings">
+          <span class="nav-icon" aria-hidden="true" data-icon="sliders"></span>
+          <span>Settings</span>
+        </button>
+        <button class="nav-item" type="button" aria-label="Add a host" data-i18n-aria-label="aria.addHost" data-action="open-pair">
+          <span class="nav-icon" aria-hidden="true" data-icon="plus"></span>
+          <span>Add a host</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="bridge-status-card">
+          <div class="bridge-orbit" aria-hidden="true">
+            <span class="orbit-core"></span>
+            <span class="orbit-ring orbit-ring-a"></span>
+            <span class="orbit-ring orbit-ring-b"></span>
+          </div>
+          <div class="bridge-copy">
+            <div class="bridge-title"><span class="status-dot is-yellow" id="bridgeStatusDot"></span> <span id="bridgeStatusLabel" data-i18n="bridge.initializing">等待桥接</span></div>
+            <div class="bridge-meta" id="bridgeStatusMeta" data-i18n="bridge.initializingMeta">正在连接本地服务…</div>
+          </div>
+          <button class="icon-button icon-button-tiny" type="button" data-action="run-diagnostic" aria-label="Run diagnostic" data-i18n-aria-label="aria.connectionDiagnostic">
+            <span data-icon="arrow-up-right" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div class="profile-row">
+          <div class="profile-avatar">JL</div>
+          <div class="profile-copy">
+            <div class="profile-name" data-i18n="profile.name">SUNBRIDGE</div>
+            <div class="profile-meta">Local profile</div>
+          </div>
+          <button class="icon-button icon-button-tiny" type="button" data-action="open-settings" aria-label="Open settings" data-i18n-aria-label="aria.quickSettings">
+            <span data-icon="more" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-panel">
+      <header class="topbar">
+        <div class="topbar-context">
+          <span class="topbar-kicker">LOCAL /</span>
+          <span class="topbar-title">SUNBRIDGE CONSOLE</span>
+        </div>
+        <div class="topbar-actions">
+          <label class="language-picker">
+            <span class="sr-only" data-i18n="language.label">语言</span>
+            <select id="languageSelect" aria-label="Language" data-i18n-aria-label="aria.language">
+              <option value="zh-CN" data-i18n="language.zh">简体中文</option>
+              <option value="en-US" data-i18n="language.en">English</option>
+            </select>
+          </label>
+          <div class="connection-pill" title="Local Sunbridge status" data-i18n-title="aria.bridgeStatus">
+            <span class="status-dot is-yellow" id="connectionStatusDot"></span>
+            <span id="connectionStatusLabel" data-i18n="bridge.initializing">等待桥接</span>
+            <span class="connection-separator"></span>
+            <span class="connection-latency" id="connectionLatency">—</span>
+          </div>
+          <button class="icon-button" type="button" data-action="run-diagnostic" aria-label="Run connection diagnostic" data-i18n-aria-label="aria.connectionDiagnostic">
+            <span data-icon="pulse" aria-hidden="true"></span>
+          </button>
+          <button class="avatar-button" type="button" data-action="open-settings" aria-label="Open profile settings" data-i18n-aria-label="aria.profileSettings">JL</button>
+          <button class="icon-button" type="button" data-action="logout" aria-label="Log out" data-i18n-aria-label="aria.logout" title="Log out" data-i18n-title="aria.logout"><span data-icon="x" aria-hidden="true"></span></button>
+        </div>
+      </header>
+
+      <div class="content-scroll">
+        <div class="session-resume-bar" id="sessionResumeBar" hidden><span class="live-dot"></span><div><strong id="sessionResumeTitle">A stream is running</strong><small id="sessionResumeDetail"></small></div><button class="primary-button" type="button" data-action="resume-session"><span id="sessionResumeLabel">Return to stream</span><span data-icon="arrow-up-right" aria-hidden="true"></span></button><button class="secondary-button" type="button" data-action="end-active-session" id="sessionEndLabel">End</button></div>
+        <section class="view is-visible" data-view="overview" aria-labelledby="overview-title">
+          <div class="eyebrow-row">
+            <div class="eyebrow"><span class="live-dot"></span> PRIVATE STREAMING CONSOLE</div>
+            <div class="build-chip">BUILD 0.1 PREVIEW <span></span></div>
+          </div>
+
+          <div class="intro-row">
+            <div>
+              <h1 id="overview-title">Stream your<br /><em>whole library.</em></h1>
+              <p class="intro-copy">A quiet, low-latency client for your own machines.<br />Pair once. Pick a game. Stay in the flow.</p>
+            </div>
+            <div class="intro-aside">
+              <div class="intro-aside-label">LAST SESSION</div>
+              <div class="intro-aside-value" id="overviewLastSession">—</div>
+              <div class="intro-aside-meta" id="overviewLastSessionMeta" data-i18n="overview.noSessionMeta">No recorded streaming session yet.</div>
+            </div>
+          </div>
+
+          <div class="hero-grid">
+            <article class="hero-card">
+              <div class="hero-aurora" aria-hidden="true"></div>
+              <div class="hero-grid-lines" aria-hidden="true"></div>
+              <div class="hero-noise" aria-hidden="true"></div>
+              <div class="hero-content">
+                <div class="hero-topline">
+                  <div class="host-tag"><span class="status-dot is-green" id="primaryHostStatusDot"></span> <span id="primaryHostStatus">READY TO STREAM</span></div>
+                  <div class="host-transport"><span data-icon="lock" aria-hidden="true"></span> <span id="primaryHostTransport">PAIRED HOST</span></div>
+                </div>
+                <div class="hero-heading-wrap">
+                  <div class="hero-overline">YOUR PRIMARY RIG</div>
+                  <h2 id="primaryHostName">No saved host</h2>
+                  <p id="primaryHostMeta">Add a Sunshine host to see its status.</p>
+                </div>
+                <div class="hero-stats">
+                  <div class="hero-stat"><span class="hero-stat-value" id="primaryHostOutput">—</span><span class="hero-stat-label">target output</span></div>
+                  <div class="hero-stat"><span class="hero-stat-value" id="primaryHostFps">—</span><span class="hero-stat-label">frames / sec</span></div>
+                  <div class="hero-stat"><span class="hero-stat-value" id="primaryHostPing">—</span><span class="hero-stat-label">estimated ping</span></div>
+                </div>
+                <div class="hero-actions">
+                  <button class="primary-button" type="button" data-action="connect" data-host="" data-app="Desktop">
+                    <span>Connect to host</span>
+                    <span class="button-arrow" data-icon="arrow-up-right" aria-hidden="true"></span>
+                  </button>
+                  <button class="ghost-button" type="button" data-action="open-host-details" id="primaryHostDetails">Host details <span data-icon="chevron-right" aria-hidden="true"></span></button>
+                </div>
+              </div>
+              <div class="hero-console" aria-hidden="true">
+                <div class="console-frame">
+                  <div class="console-top"><span></span><span></span><span></span><small>STREAM / 01</small></div>
+                  <div class="console-screen">
+                    <div class="screen-sun"></div>
+                    <div class="screen-mountain screen-mountain-back"></div>
+                    <div class="screen-mountain screen-mountain-front"></div>
+                    <div class="screen-ridge"></div>
+                    <div class="screen-scanlines"></div>
+                    <div class="screen-crosshair"><span></span><i></i></div>
+                    <div class="screen-readout">WAITING FOR HOST<br /><strong>—</strong></div>
+                  </div>
+                  <div class="console-footer"><span>CONTROL / —</span><span>MEDIA / —</span><span>INPUT / —</span></div>
+                </div>
+              </div>
+            </article>
+
+            <aside class="signal-card">
+              <div class="signal-card-head">
+                <div>
+                  <div class="section-overline">SIGNAL HEALTH</div>
+                  <h3>Clean path</h3>
+                </div>
+                <span class="signal-mark" data-icon="check" aria-label="Healthy" data-i18n-aria-label="signal.health"></span>
+              </div>
+              <div class="signal-chart" aria-label="Network signal history illustration" data-i18n-aria-label="aria.signalChart">
+                <div class="chart-grid"></div>
+                <svg viewBox="0 0 320 126" preserveAspectRatio="none" role="img" aria-label="Stable latency line" data-i18n-aria-label="aria.stableLatency">
+                  <defs>
+                    <linearGradient id="signalFill" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0" stop-color="#86e6ff" stop-opacity="0.28" />
+                      <stop offset="1" stop-color="#86e6ff" stop-opacity="0" />
+                    </linearGradient>
+                  </defs>
+                  <path class="chart-fill" d="M0,78 C22,75 26,58 45,62 C63,65 70,77 89,65 C108,52 116,68 131,64 C148,60 153,43 170,48 C190,55 195,70 212,60 C230,50 238,59 251,56 C270,51 282,41 301,48 C310,51 315,48 320,45 L320,126 L0,126 Z" />
+                  <path class="chart-line" d="M0,78 C22,75 26,58 45,62 C63,65 70,77 89,65 C108,52 116,68 131,64 C148,60 153,43 170,48 C190,55 195,70 212,60 C230,50 238,59 251,56 C270,51 282,41 301,48 C310,51 315,48 320,45" />
+                  <circle class="chart-dot" cx="170" cy="48" r="4" />
+                </svg>
+                <div class="chart-tooltip"><strong id="signalTooltipValue">—</strong><span id="signalTooltipTime" data-i18n="diagnostic.waiting">Waiting for diagnostic</span></div>
+              </div>
+              <div class="signal-legend"><span><i class="legend-line"></i> latency</span><span>last 60 sec</span></div>
+              <div class="signal-metrics">
+                <div><span class="metric-label" data-i18n="signal.jitter">JITTER</span><strong>—</strong></div>
+                <div><span class="metric-label" data-i18n="signal.loss">LOSS</span><strong>—</strong></div>
+                <div><span class="metric-label" data-i18n="signal.route">ROUTE</span><strong>—</strong></div>
+              </div>
+              <button class="text-button" type="button" data-view-target="network">Inspect network path <span data-icon="arrow-up-right" aria-hidden="true"></span></button>
+            </aside>
+          </div>
+
+          <div class="section-heading-row library-heading">
+            <div>
+              <div class="section-overline">RECENTLY PLAYED</div>
+              <h2>Library</h2>
+            </div>
+            <div class="section-heading-actions">
+              <span class="library-count" id="libraryCount">—</span>
+              <button class="icon-button" type="button" data-action="open-pair" aria-label="Add a host" data-i18n-aria-label="aria.addHost"><span data-icon="plus" aria-hidden="true"></span></button>
+            </div>
+          </div>
+
+          <div class="game-grid" id="gameLibrary">
+            <div class="activity-empty"><strong data-i18n="library.empty">No apps synced yet.</strong><span data-i18n="overview.noHostMeta">Add a Sunshine host to load its application list.</span></div>
+          </div>
+
+          <div class="overview-lower-grid">
+            <section class="activity-panel">
+              <div class="panel-header"><div><div class="section-overline">SESSION LOG</div><h2>Recent activity</h2></div><button class="text-button subtle" type="button" data-action="clear-activity">Clear <span data-icon="x" aria-hidden="true"></span></button></div>
+              <div class="activity-list" id="activityList">
+                <div class="activity-empty" data-i18n="activity.empty">No activity yet. Your next streaming session will appear here.</div>
+              </div>
+</section>
+
+            <section class="protocol-panel">
+              <div class="panel-header"><div><div class="section-overline">SUNSHINE COMPATIBILITY</div><h2>Protocol path</h2></div><span class="protocol-badge" id="protocolBadge">LIVE CONTROL PLANE</span></div>
+              <div class="protocol-flow">
+                <div class="protocol-node"><span class="protocol-node-icon" data-icon="browser" aria-hidden="true"></span><div><strong data-i18n="protocol.browser">Browser</strong><small data-i18n="protocol.uiControls">UI + controls</small></div></div>
+                <span class="flow-line"><i></i><i></i><i></i></span>
+                <div class="protocol-node"><span class="protocol-node-icon" data-icon="bridge" aria-hidden="true"></span><div><strong data-i18n="protocol.bridge">Bridge</strong><small data-i18n="protocol.localApi">WS / WebRTC</small></div></div>
+                <span class="flow-line"><i></i><i></i><i></i></span>
+                <div class="protocol-node"><span class="protocol-node-icon" data-icon="server" aria-hidden="true"></span><div><strong data-i18n="protocol.sunshine">Sunshine</strong><small data-i18n="protocol.gameStream">GameStream host</small></div></div>
+              </div>
+              <p class="protocol-note" data-i18n="protocol.noteLive">The web shell is transport-ready, but raw GameStream UDP/RTSP still needs a local bridge for real video decode and input forwarding.</p>
+              <button class="text-button" type="button" data-view-target="network">View port map <span data-icon="arrow-up-right" aria-hidden="true"></span></button>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="hosts" aria-labelledby="hosts-title">
+          <div class="page-header-row"><div><div class="eyebrow"><span class="live-dot"></span> HOST DIRECTORY</div><h1 id="hosts-title">Your hosts.</h1><p>Pair once, then launch a session without leaving the browser.</p></div><button class="primary-button" type="button" data-action="open-pair"><span data-icon="plus" aria-hidden="true"></span><span>Add a host</span></button></div>
+          <div class="host-list" id="hostList">
+            <div class="activity-empty"><strong data-i18n="host.noHosts">No saved hosts yet.</strong><span data-i18n="host.noHostsHint">Add a Sunshine host to begin pairing.</span><button class="primary-button" type="button" data-action="open-pair"><span data-icon="plus" aria-hidden="true"></span><span data-i18n="action.addHost">Add a host</span></button></div>
+          </div>
+          <div class="info-callout"><span class="callout-icon" data-icon="info" aria-hidden="true"></span><div><strong data-i18n="protocol.compatibility">Browser transport note</strong><p data-i18n="protocol.noteLive">Discovery and pairing are represented here as a local adapter. To stream in a real browser, wire this UI to a native helper or WebRTC gateway that speaks the Sunshine (GameStream) session protocol.</p></div></div>
+        </section>
+
+        <section class="view" data-view="network" aria-labelledby="network-title">
+          <div class="page-header-row"><div><div class="eyebrow"><span class="live-dot"></span> TRANSPORT OBSERVATORY</div><h1 id="network-title">Network path.</h1><p>See how the web shell maps to the host-side GameStream services.</p></div><button class="secondary-button" type="button" data-action="run-diagnostic"><span data-icon="pulse" aria-hidden="true"></span> Run diagnostic</button></div>
+          <div class="network-summary-grid"><div class="network-summary-card"><span class="network-summary-icon" data-icon="pulse" aria-hidden="true"></span><div><span>Round trip</span><strong id="latencyValue">—</strong></div><small data-i18n="diagnostic.waiting">等待诊断</small></div><div class="network-summary-card"><span class="network-summary-icon" data-icon="wifi" aria-hidden="true"></span><div><span>Link quality</span><strong>—</strong></div><small>—</small></div><div class="network-summary-card"><span class="network-summary-icon" data-icon="shield" aria-hidden="true"></span><div><span>Pairing</span><strong>—</strong></div><small>—</small></div></div>
+          <div class="network-layout"><section class="network-map-panel"><div class="panel-header"><div><div class="section-overline">REQUEST / SESSION</div><h2>Browser → bridge → host</h2></div><span class="protocol-badge">LAN</span></div><div class="network-map"><div class="map-line map-line-one"></div><div class="map-line map-line-two"></div><div class="map-node map-browser"><div class="map-node-icon" data-icon="browser" aria-hidden="true"></div><strong>Sunbridge Web</strong><span>HTTPS / UI</span></div><div class="map-node map-bridge"><div class="map-node-icon" data-icon="bridge" aria-hidden="true"></div><strong>Local bridge</strong><span>WebSocket + decode</span></div><div class="map-node map-host"><div class="map-node-icon" data-icon="server" aria-hidden="true"></div><strong id="networkHostName">No saved host</strong><span id="networkHostAddress">Add a Sunshine host</span></div><div class="map-legend"><span><i class="legend-dot is-green"></i> paired</span><span><i class="legend-dot is-blue"></i> control plane</span></div></div></section><section class="port-panel"><div class="panel-header"><div><div class="section-overline">SUNSHINE DEFAULTS</div><h2>Port map</h2></div><button class="text-button subtle" type="button" data-action="copy-ports">Copy <span data-icon="copy" aria-hidden="true"></span></button></div><div class="port-table" id="portTable"><div class="port-row port-head"><span>service</span><span>port</span><span>transport</span><span>state</span></div><div class="port-row"><span>HTTPS</span><strong>47984</strong><span>TCP</span><span class="port-state"><i></i> ready</span></div><div class="port-row"><span>HTTP</span><strong>47989</strong><span>TCP</span><span class="port-state"><i></i> ready</span></div><div class="port-row"><span>Web UI</span><strong>47990</strong><span>TCP</span><span class="port-state"><i></i> ready</span></div><div class="port-row"><span>RTSP</span><strong>48010</strong><span>TCP</span><span class="port-state"><i></i> bridged</span></div><div class="port-row"><span>Video</span><strong>47998</strong><span>UDP</span><span class="port-state is-blue"><i></i> bridged</span></div><div class="port-row"><span>Control</span><strong>47999</strong><span>UDP</span><span class="port-state is-blue"><i></i> bridged</span></div><div class="port-row"><span>Audio</span><strong>48000</strong><span>UDP</span><span class="port-state is-blue"><i></i> bridged</span></div></div></section></div>
+          <div class="diagnostic-log" id="diagnosticLog"><div class="diagnostic-log-head"><span>LIVE DIAGNOSTIC</span><span id="diagnosticStatus">idle</span></div><div class="log-lines"><div><time>—</time><span class="log-ok">--</span><code data-i18n="diagnostic.waiting">等待诊断</code><small>—</small></div></div></div>
+        </section>
+
+        <section class="view" data-view="settings" aria-labelledby="settings-title">
+          <div class="page-header-row"><div><div class="eyebrow"><span class="live-dot"></span> CLIENT PREFERENCES</div><h1 id="settings-title">Make it yours.</h1><p>Small controls for a calmer streaming session.</p></div><span class="settings-saved"><span class="status-dot is-green"></span><span class="settings-saved-text">Autosaved</span></span></div>
+          <div class="settings-layout"><section class="settings-card"><div class="panel-header"><div><div class="section-overline">STREAM PROFILE</div><h2>Output defaults</h2></div><span class="settings-card-index">01</span></div><label class="setting-row"><span><strong>Resolution</strong><small>Preferred stream canvas</small></span><select id="resolutionSelect"><option value="auto">Adaptive</option><option value="1280x720">1280 × 720</option><option value="1920x1080">1920 × 1080</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select></label><label class="setting-row"><span><strong>Frame rate</strong><small>Keep motion smooth on LAN</small></span><select id="fpsSelect"><option value="60">60 fps</option><option value="90">90 fps</option><option value="120">120 fps</option></select></label><label class="setting-row"><span><strong>Video codec</strong><small>Negotiated with bridge</small></span><select id="codecSelect"><option value="auto">Auto</option><option value="av1">AV1</option><option value="hevc">HEVC</option><option value="h264">H.264</option></select></label><label class="setting-row" id="bitrateModeRow"><span><strong>Bitrate</strong><small>Adapt to the network</small></span><select id="bitrateModeSelect"><option value="auto">Auto</option><option value="fixed">Fixed</option></select></label><div class="setting-row setting-toggle-row"><span><strong>Match host display</strong><small>Use the host's active refresh mode</small></span><button class="toggle is-on" type="button" aria-pressed="true" data-toggle="match-display"><span></span></button></div></section><section class="settings-card"><div class="panel-header"><div><div class="section-overline">INPUT &amp; UI</div><h2>Session behavior</h2></div><span class="settings-card-index">02</span></div><label class="setting-row" id="controlModeRow"><span><strong>Control mode</strong><small>Remote desktop or game</small></span><select id="controlModeSelect"><option value="auto">Auto</option><option value="desktop">Remote desktop</option><option value="game">Game</option></select></label><div class="setting-row setting-toggle-row"><span><strong>Capture pointer</strong><small>Lock pointer when stream begins</small></span><button class="toggle is-on" type="button" aria-pressed="true" data-toggle="capture-pointer"><span></span></button></div><div class="setting-row setting-toggle-row"><span><strong>Show telemetry</strong><small>FPS, latency and bitrate overlay</small></span><button class="toggle is-on" type="button" aria-pressed="true" data-toggle="show-telemetry"><span></span></button></div><div class="setting-row setting-toggle-row"><span><strong>Ask before launch</strong><small>Confirm every new session</small></span><button class="toggle" type="button" aria-pressed="false" data-toggle="ask-launch"><span></span></button></div><div class="setting-row setting-toggle-row"><span><strong>Reduce motion</strong><small>Prefer steadier interface transitions</small></span><button class="toggle" type="button" aria-pressed="false" data-toggle="reduce-motion"><span></span></button></div></section></div>
+          <div class="settings-footnote"><span data-icon="info" aria-hidden="true"></span><p>These controls belong to the presentation layer. The real transport adapter should persist its own encoder, decoder and input capabilities.</p></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
+
+  <div class="modal-backdrop" id="pairModal" hidden>
+    <section class="modal-panel pair-panel" role="dialog" aria-modal="true" aria-labelledby="pair-title" aria-label="Pair a Sunshine host" data-i18n-aria-label="aria.pairModal">
+      <button class="modal-close icon-button" type="button" data-action="close-pair" aria-label="Close dialog" data-i18n-aria-label="aria.closePair"><span data-icon="x" aria-hidden="true"></span></button>
+      <div class="modal-eyebrow"><span class="live-dot"></span> NEW HOST</div>
+      <h2 id="pair-title">Bring a host online.</h2>
+      <p class="modal-copy">Use the Sunshine host address on your local network. Pairing stays on this device.</p>
+      <div class="pair-stepper" id="pairStepper"><div class="pair-step is-active"><span>01</span><small>discover</small></div><i></i><div class="pair-step"><span>02</span><small>pair</small></div><i></i><div class="pair-step"><span>03</span><small>sync</small></div></div>
+      <form id="pairForm" class="pair-form">
+        <label><span>Host address</span><div class="input-shell"><span data-icon="server" aria-hidden="true"></span><input id="hostAddress" name="hostAddress" placeholder="192.168.1.42 or host name" data-i18n-placeholder="pair.addressPlaceholder" autocomplete="off" /></div></label>
+        <div class="form-grid"><label><span>Display name</span><div class="input-shell"><span data-icon="tag" aria-hidden="true"></span><input id="hostName" name="hostName" placeholder="My gaming rig" data-i18n-placeholder="pair.namePlaceholder" autocomplete="off" /></div></label><label><span>Pairing PIN</span><div class="input-shell"><span data-icon="key" aria-hidden="true"></span><input id="pairPin" name="pairPin" placeholder="4-digit PIN" data-i18n-placeholder="pair.pinPlaceholder" inputmode="numeric" maxlength="4" autocomplete="one-time-code" /></div></label></div>
+        <div class="pair-note"><span data-icon="shield" aria-hidden="true"></span><span>The browser client will hand the certificate exchange to the local bridge.</span></div>
+        <button class="primary-button full-width" type="submit"><span>Pair this host</span><span class="button-arrow" data-icon="arrow-up-right" aria-hidden="true"></span></button>
+      </form>
+      <div class="pair-progress" id="pairProgress" hidden><div class="progress-label"><span id="pairProgressLabel">Opening local discovery…</span><span id="pairProgressPercent">0%</span></div><div class="progress-track"><span id="pairProgressBar"></span></div><div class="progress-detail" id="pairProgressDetail">Waiting for a bridge response</div></div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="hostModal" hidden>
+    <section class="modal-panel host-panel" role="dialog" aria-modal="true" aria-labelledby="host-modal-title" id="hostPanel"></section>
+  </div>
+
+  <aside class="settings-drawer" id="settingsDrawer" aria-label="Quick settings" data-i18n-aria-label="aria.quickSettings" aria-hidden="true">
+    <div class="drawer-head"><div><div class="section-overline">QUICK SETTINGS</div><h2>Session defaults</h2></div><button class="icon-button" type="button" data-action="close-settings" aria-label="Close settings" data-i18n-aria-label="aria.closeSettings"><span data-icon="x" aria-hidden="true"></span></button></div>
+    <div class="drawer-status"><span class="status-dot is-green" id="drawerBridgeStatusDot"></span><div><strong id="drawerBridgeStatus">Bridge is ready</strong><small id="drawerBridgeMeta">Local adapter status</small></div></div>
+    <div class="drawer-section"><div class="drawer-section-label" data-i18n="settings.video">VIDEO</div><label class="drawer-setting"><span data-i18n="drawer.quality">Quality</span><select><option data-i18n="drawer.qualityBalanced">Balanced · 1080p60</option><option data-i18n="drawer.qualitySharp">Sharp · 1440p60</option><option data-i18n="drawer.qualityUltra">Ultra · 4K60</option></select></label><label class="drawer-setting"><span data-i18n="drawer.hdr">HDR</span><button class="toggle" type="button" data-toggle="drawer-hdr" aria-pressed="false"><span></span></button></label></div>
+    <div class="drawer-section"><div class="drawer-section-label" data-i18n="settings.inputUi">INPUT</div><label class="drawer-setting"><span data-i18n="drawer.pointer">Pointer capture</span><button class="toggle is-on" type="button" data-toggle="drawer-pointer" aria-pressed="true"><span></span></button></label><label class="drawer-setting"><span data-i18n="drawer.stats">On-screen stats</span><button class="toggle is-on" type="button" data-toggle="drawer-stats" aria-pressed="true"><span></span></button></label></div>
+    <div class="drawer-footer"><button class="text-button" type="button" data-view-target="settings">Open all settings <span data-icon="arrow-up-right" aria-hidden="true"></span></button></div>
+  </aside>
+
+  <div class="stream-overlay" id="streamOverlay" role="dialog" aria-modal="true" aria-label="Streaming session status" data-i18n-aria-label="aria.streamOverlay" hidden>
+    <div class="stream-shell">
+      <header class="stream-header"><div class="stream-brand"><img src="assets/sunbridge-icon.svg" alt="" /><span>SUNBRIDGE / WEB CLIENT</span></div><div class="stream-session-name" id="streamSessionName">DESKTOP SESSION</div><div class="stream-header-actions"><span class="stream-live"><i></i> <span id="streamLiveLabel">LIVE</span></span><button class="stream-mode-button" id="streamModeButton" type="button" data-action="toggle-control-mode"><span data-icon="mouse" aria-hidden="true"></span><span id="streamModeLabel">Desktop</span></button><button class="icon-button stream-icon-button stream-keyboard-button" id="streamKeyboardButton" type="button" data-action="show-keyboard"><span data-icon="keyboard" aria-hidden="true"></span></button><button class="icon-button stream-icon-button" id="streamFullscreenButton" type="button" data-action="toggle-fullscreen"><span data-icon="expand" aria-hidden="true"></span></button><button class="icon-button stream-icon-button" type="button" data-action="open-settings" aria-label="Session settings" data-i18n-aria-label="aria.sessionSettings"><span data-icon="sliders" aria-hidden="true"></span></button><button class="stream-end-button" type="button" data-action="stop-session" aria-label="End session" data-i18n-aria-label="aria.endSession"><span id="streamEndLabel">End session</span> <span data-icon="x" aria-hidden="true"></span></button></div></header>
+      <main class="stream-stage"><div class="stream-background-grid"></div><div class="stream-scene"><div class="scene-sun"></div><div class="scene-planet"></div><div class="scene-mountain scene-mountain-a"></div><div class="scene-mountain scene-mountain-b"></div><div class="scene-fog scene-fog-a"></div><div class="scene-fog scene-fog-b"></div><div class="scene-ground"></div><div class="scene-grid"></div><div class="scene-player"><span></span><i></i></div></div><canvas id="streamVideoCanvas" class="stream-video-canvas" role="img" aria-label="Sunshine live video canvas" data-i18n-aria-label="aria.streamVideo"></canvas><div class="stream-vignette"></div><div class="stream-overlay-top"><span id="streamControlBadge" data-state="starting">CONTROL / STARTING</span><span id="streamRtspBadge" data-state="probing">RTSP / PROBING</span><span id="streamMediaBadge" data-state="not-connected">MEDIA / NOT CONNECTED</span><span id="streamGatewayBadge" data-state="waiting">BROWSER / WS WAITING</span><span id="streamInputBadge" data-state="not-connected">INPUT / NOT CONNECTED</span></div><div class="stream-crosshair"><span></span><i></i></div><div class="stream-center-status" id="streamCenterStatus"><div class="stream-spinner"></div><span>Negotiating session…</span></div><div class="stream-reconnect" id="streamReconnect" hidden><div class="stream-spinner"></div><div><strong id="streamReconnectTitle">Reconnecting…</strong><span id="streamReconnectDetail"></span></div></div><textarea class="stream-keyboard-input" id="streamKeyboardInput" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1"></textarea><div class="stream-hud" id="streamHud" data-level="idle">
+          <button class="stream-hud-bar" type="button" data-action="toggle-stats" aria-expanded="false" aria-controls="streamHudDetail"><span class="hud-metric"><strong id="hudFps">—</strong><small>fps</small></span><span class="hud-metric"><strong id="hudMbps">—</strong><small>Mbps</small></span><span class="hud-metric hud-latency"><strong id="hudLatency">—</strong><small>ms</small></span></button>
+          <div class="stream-hud-detail" id="streamHudDetail" hidden></div>
+        </div><button class="stream-audio-prompt" id="streamEnableAudio" type="button" data-action="enable-audio" aria-label="Enable audio output" data-i18n-aria-label="aria.enableAudio" hidden><span data-i18n="session.enableAudio">Enable audio</span><small data-i18n="session.enableAudioDetail">Click to resume Web Audio output.</small></button><div class="stream-hint" id="streamHint">Press <kbd>Esc</kbd> to end · pointer capture ready</div></main>
+      <footer class="stream-footer"><div class="stream-footer-left"><span class="status-dot is-green"></span><span id="streamFooterStatus">Control plane</span></div><div class="stream-footer-right"><span id="streamFooterResolution">1080p / 60 fps</span><span class="footer-separator"></span><span id="streamFooterTransport">LIVE CONTROL PLANE</span><span class="footer-separator"></span><span id="streamFooterBridge">LIVE MODE</span></div></footer>
+    </div>
+  </div>
+
+
+  <script src="i18n.js"></script>
+  <script src="bridge.js"></script>
+  <script src="media.js"></script>
+  <script src="input.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+# Your data: pairing keys, password hashes, certificates, access config. Never commit.
+/data/
+
+# Generated / local
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

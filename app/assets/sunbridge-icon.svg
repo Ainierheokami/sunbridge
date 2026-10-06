@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#173540"/>
+      <stop offset="1" stop-color="#0a161d"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6d9a0"/>
+      <stop offset="1" stop-color="#e9a95f"/>
+    </linearGradient>
+    <clipPath id="above-deck"><rect x="0" y="0" width="64" height="41"/></clipPath>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#bg)"/>
+  <!-- rising sun behind the bridge -->
+  <g clip-path="url(#above-deck)">
+    <circle cx="32" cy="41" r="13" fill="url(#sun)"/>
+  </g>
+  <g stroke="#f2c98a" stroke-width="2.4" stroke-linecap="round" opacity="0.85">
+    <path d="M32 18v-5M20.5 23l-3.4-3.4M43.5 23l3.4-3.4M15.5 33h-4.7M48.5 33h4.7"/>
+  </g>
+  <!-- bridge: arch, hangers and deck -->
+  <g fill="none" stroke="#a8edf7" stroke-linecap="round">
+    <path d="M9 47C17 31 47 31 55 47" stroke-width="3.2"/>
+    <path d="M20 39.2V47M26 36.6V47M32 35.8V47M38 36.6V47M44 39.2V47" stroke-width="1.8" opacity="0.8"/>
+    <path d="M6 47H58" stroke-width="3.2"/>
+  </g>
+  <path d="M14 53h12M33 53h17" stroke="#6cd9eb" stroke-width="2" stroke-linecap="round" opacity="0.45"/>
+</svg>
