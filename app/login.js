@@ -60,13 +60,38 @@
     .then((response) => response.json())
     .then((status) => {
       if (status.authenticated) window.location.replace(next);
-      else if (status.setupRequired) {
-        show('尚未设置登录密码。请在运行 Sunbridge 的电脑上运行 start.bat（或 ./start.sh）设置登录密码，然后刷新本页。', true);
-        submit.disabled = true;
-      }
+      else if (status.setupRequired) showSetup();
       document.getElementById('insecureWarning').hidden = !status.insecureTransport;
     })
     .catch(() => show('无法连接 Bridge。'));
+
+  // First run: create the account with the setup code from the bridge's console.
+  const setupForm = document.getElementById('setupForm');
+  const setupMessage = document.getElementById('setupMessage');
+  const showSetup = () => {
+    form.hidden = true;
+    setupForm.hidden = false;
+    document.getElementById('brandCaption').textContent = '创建账户';
+    document.getElementById('setupCode').focus();
+  };
+  setupForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const password = document.getElementById('setupPassword').value;
+    if (password !== document.getElementById('setupPassword2').value) { show('两次输入的密码不一致。', false, setupMessage); return; }
+    const button = document.getElementById('setupSubmit');
+    button.disabled = true;
+    show('', false, setupMessage);
+    try {
+      const { response, payload } = await post('/api/auth/setup', { code: document.getElementById('setupCode').value, username: document.getElementById('setupUsername').value.trim(), password });
+      if (response.ok && payload.ok) { window.location.replace(next); return; }
+      if (payload.errorCode === 'AUTH_ALREADY_SET_UP') { window.location.reload(); return; }
+      show(payload.errorCode === 'AUTH_RATE_LIMITED' ? retryText(payload) : payload.error || '创建失败。', false, setupMessage);
+    } catch {
+      show('无法连接 Bridge。', false, setupMessage);
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();

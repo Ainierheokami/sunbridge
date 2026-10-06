@@ -188,13 +188,23 @@ function normalizeHost(value) {
   return String(value || '').trim().toLowerCase().replace(/\.$/, '');
 }
 
-export function createAuth({ dataDir, trustProxy = false, secure = false, extraOrigins = [] }) {
+// Setup code for creating the account from the web page (first run). Printed on the console and kept in
+// <data>/setup-code so `start.sh status` can show it; whoever can read either is on the bridge machine.
+export const setupCodeFile = (dataDir) => path.join(dataDir, 'setup-code');
+
+// Transport facts come from the entrypoint the request arrived on (server.mjs sets request.sunbridgeEntry):
+// whether it is HTTPS, and whether it sits behind a trusted reverse proxy whose X-Forwarded-* to believe.
+const entryOf = (request) => request.sunbridgeEntry || request.socket?.sunbridgeEntry || {};
+const viaProxy = (request) => entryOf(request).proxy?.enabled === true;
+
+export function createAuth({ dataDir, extraOrigins = [] }) {
   let state = loadAuthState(dataDir);
   const failures = new Map(); // ip -> { count, lockedUntil }
   let globalFailures = [];
   let lastPersist = 0;
   // In memory only (a restart asks again): password-verified logins waiting for their code, enrolments
   // in progress, and per-login-session step-up state { verifiedAt, streams: Set<stream session id> }.
+  let setupCode = null;
   const loginChallenges = new Map(); // sha256(challenge) -> { expiresAt, attempts, ip }
   const enrollments = new Map(); // login session id -> { secret, expiresAt }
   const elevations = new Map(); // login session id -> { verifiedAt, streams }
@@ -210,17 +220,19 @@ export function createAuth({ dataDir, trustProxy = false, secure = false, extraO
   loadedMtime = mtime();
 
   const clientIp = (request) => {
-    if (trustProxy) {
+    if (viaProxy(request)) {
       const forwarded = String(request.headers['x-forwarded-for'] || '').split(',')[0].trim();
       if (forwarded) return forwarded;
     }
     return String(request.socket?.remoteAddress || '').replace(/^::ffff:/, '');
   };
 
-  const isSecureRequest = (request) => secure || (trustProxy && String(request.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https');
+  const isSecureRequest = (request) => (viaProxy(request)
+    ? String(request.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https'
+    : entryOf(request).https === true);
 
   // The host the browser used to reach us (the tunnel/proxy's public host when trusted).
-  const effectiveHost = (request) => normalizeHost((trustProxy && String(request.headers['x-forwarded-host'] || '').split(',')[0]) || request.headers.host);
+  const effectiveHost = (request) => normalizeHost((viaProxy(request) && String(request.headers['x-forwarded-host'] || '').split(',')[0]) || request.headers.host);
 
   // Same-origin check for state-changing requests and WebSocket upgrades (CSRF / cross-site WebSocket hijacking).
   const isSameOrigin = (request, { allowMissing = false } = {}) => {
@@ -371,9 +383,62 @@ export function createAuth({ dataDir, trustProxy = false, secure = false, extraO
   return {
     SESSION_COOKIE,
     clientIp,
+    effectiveHost,
     isSameOrigin,
     isSecureRequest,
     get setupRequired() { reload(); return !state.user; },
+
+    // The current setup code while no account exists (created on first call), else null.
+    setupCode() {
+      reload();
+      const file = setupCodeFile(dataDir);
+      if (state.user) {
+        setupCode = null;
+        try { fs.unlinkSync(file); } catch { /* already gone */ }
+        return null;
+      }
+      if (!setupCode) {
+        const raw = base32Encode(crypto.randomBytes(5)).slice(0, 8);
+        setupCode = `${raw.slice(0, 4)}-${raw.slice(4)}`;
+        try { fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 }); fs.writeFileSync(file, `${setupCode}\n`, { mode: 0o600 }); } catch { /* console only */ }
+      }
+      return setupCode;
+    },
+
+    // First run from the web page: the setup code proves the person can see the bridge's console or files.
+    async createAccount(request, code, username, password) {
+      reload();
+      if (state.user) return { ok: false, errorCode: 'AUTH_ALREADY_SET_UP' };
+      const ip = clientIp(request);
+      const locked = lockState(ip);
+      if (locked > 0) return { ok: false, errorCode: 'AUTH_RATE_LIMITED', retryAfterMs: locked };
+      if (!transportOk(request)) return { ok: false, errorCode: 'AUTH_INSECURE_TRANSPORT' };
+      const expected = this.setupCode();
+      const given = normalizeCode(code).replace(/[^A-Z0-9]/g, '');
+      const want = expected.replace(/-/g, '');
+      if (given.length !== want.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(want))) return fail(ip, 'AUTH_SETUP_CODE_INVALID');
+      const name = String(username || '').trim();
+      if (!/^[\w.@-]{1,64}$/.test(name)) return { ok: false, errorCode: 'AUTH_WEAK_PASSWORD', error: '用户名只能包含字母、数字、下划线、点、@ 和 -，最长 64 个字符' };
+      const problem = validatePassword(password);
+      if (problem) return { ok: false, errorCode: 'AUTH_WEAK_PASSWORD', error: problem };
+      state.user = { username: name, ...(await hashPassword(password)), updatedAt: new Date().toISOString() };
+      state.sessions = [];
+      failures.delete(ip);
+      const created = createSession(request, ip);
+      this.setupCode();
+      return { ok: true, username: name, cookie: created.cookie };
+    },
+
+    // Re-enter the password for sensitive changes (network settings).
+    async verifyPassword(request, password) {
+      reload();
+      if (!sessionFor(request)) return { ok: false, errorCode: 'AUTH_REQUIRED' };
+      const ip = clientIp(request);
+      const locked = lockState(ip);
+      if (locked > 0) return { ok: false, errorCode: 'AUTH_RATE_LIMITED', retryAfterMs: locked };
+      if (!(await checkPassword(password))) return fail(ip, 'AUTH_INVALID_CREDENTIALS');
+      return { ok: true };
+    },
     sessionFor,
 
     status(request) {

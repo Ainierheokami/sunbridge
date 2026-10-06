@@ -48,6 +48,14 @@
           <span class="nav-icon" aria-hidden="true" data-icon="sliders"></span>
           <span>Settings</span>
         </button>
+        <button class="nav-item" type="button" aria-label="Access" data-i18n-aria-label="nav.access" data-view-target="access">
+          <span class="nav-icon" aria-hidden="true" data-icon="shield"></span>
+          <span>Access</span>
+        </button>
+        <button class="nav-item" type="button" aria-label="Logs" data-i18n-aria-label="nav.logs" data-view-target="logs">
+          <span class="nav-icon" aria-hidden="true" data-icon="list"></span>
+          <span>Logs</span>
+        </button>
         <button class="nav-item" type="button" aria-label="Add a host" data-i18n-aria-label="aria.addHost" data-action="open-pair">
           <span class="nav-icon" aria-hidden="true" data-icon="plus"></span>
           <span>Add a host</span>
@@ -266,6 +274,14 @@
           <div class="settings-layout"><section class="settings-card"><div class="panel-header"><div><div class="section-overline">STREAM PROFILE</div><h2>Output defaults</h2></div><span class="settings-card-index">01</span></div><label class="setting-row"><span><strong>Resolution</strong><small>Preferred stream canvas</small></span><select id="resolutionSelect"><option value="auto">Adaptive</option><option value="1280x720">1280 × 720</option><option value="1920x1080">1920 × 1080</option><option value="2560x1440">2560 × 1440</option><option value="3840x2160">3840 × 2160</option></select></label><label class="setting-row"><span><strong>Frame rate</strong><small>Keep motion smooth on LAN</small></span><select id="fpsSelect"><option value="60">60 fps</option><option value="90">90 fps</option><option value="120">120 fps</option></select></label><label class="setting-row"><span><strong>Video codec</strong><small>Negotiated with bridge</small></span><select id="codecSelect"><option value="auto">Auto</option><option value="av1">AV1</option><option value="hevc">HEVC</option><option value="h264">H.264</option></select></label><label class="setting-row" id="bitrateModeRow"><span><strong>Bitrate</strong><small>Adapt to the network</small></span><select id="bitrateModeSelect"><option value="auto">Auto</option><option value="fixed">Fixed</option></select></label><div class="setting-row setting-toggle-row"><span><strong>Match host display</strong><small>Use the host's active refresh mode</small></span><button class="toggle is-on" type="button" aria-pressed="true" data-toggle="match-display"><span></span></button></div></section><section class="settings-card"><div class="panel-header"><div><div class="section-overline">INPUT &amp; UI</div><h2>Session behavior</h2></div><span class="settings-card-index">02</span></div><label class="setting-row" id="controlModeRow"><span><strong>Control mode</strong><small>Remote desktop or game</small></span><select id="controlModeSelect"><option value="auto">Auto</option><option value="desktop">Remote desktop</option><option value="game">Game</option></select></label><div class="setting-row setting-toggle-row"><span><strong>Capture pointer</strong><small>Lock pointer when stream begins</small></span><button class="toggle is-on" type="button" aria-pressed="true" data-toggle="capture-pointer"><span></span></button></div><div class="setting-row setting-toggle-row"><span><strong>Show telemetry</strong><small>FPS, latency and bitrate overlay</small></span><button class="toggle is-on" type="button" aria-pressed="true" data-toggle="show-telemetry"><span></span></button></div><div class="setting-row setting-toggle-row"><span><strong>Ask before launch</strong><small>Confirm every new session</small></span><button class="toggle" type="button" aria-pressed="false" data-toggle="ask-launch"><span></span></button></div><div class="setting-row setting-toggle-row"><span><strong>Reduce motion</strong><small>Prefer steadier interface transitions</small></span><button class="toggle" type="button" aria-pressed="false" data-toggle="reduce-motion"><span></span></button></div></section><section class="settings-card settings-card-wide" id="appearanceCard"><div class="panel-header"><div><div class="section-overline" data-i18n="appearance.overline">外观</div><h2 data-i18n="appearance.title">外观与文字</h2></div></div><div class="setting-row"><span><strong data-i18n="appearance.theme">主题</strong><small data-i18n="appearance.themeHint">跟随系统时，会随电脑的浅色 / 深色模式自动切换</small></span><div class="segmented" role="group" data-appearance="theme" aria-label="Theme" data-i18n-aria-label="appearance.theme"><button type="button" data-value="system" data-i18n="appearance.system">跟随系统</button><button type="button" data-value="light" data-i18n="appearance.light">浅色</button><button type="button" data-value="dark" data-i18n="appearance.dark">深色</button></div></div><div class="setting-row"><span><strong data-i18n="appearance.textSize">文字大小</strong><small data-i18n="appearance.textSizeHint">放大整个界面的文字和按钮，只影响这个浏览器</small></span><div class="segmented" role="group" data-appearance="text-size" aria-label="Text size" data-i18n-aria-label="appearance.textSize"><button type="button" data-value="normal" data-i18n="appearance.normal">标准</button><button type="button" data-value="large" data-i18n="appearance.large">较大</button><button type="button" data-value="xlarge" data-i18n="appearance.xlarge">特大</button></div></div></section></div>
           <div class="settings-footnote"><span data-icon="info" aria-hidden="true"></span><p>These controls belong to the presentation layer. The real transport adapter should persist its own encoder, decoder and input capabilities.</p></div>
         </section>
+        <section class="view" data-view="access" aria-labelledby="access-title">
+          <div class="page-header-row"><div><h1 id="access-title" data-i18n="access.title">访问设置</h1><p data-i18n="access.intro">设置 Sunbridge 在哪些地址和端口上接受连接。</p></div></div>
+          <div id="accessView"></div>
+        </section>
+        <section class="view" data-view="logs" aria-labelledby="logs-title">
+          <div class="page-header-row"><div><h1 id="logs-title" data-i18n="logs.title">日志</h1><p data-i18n="logs.intro">登录、被拒绝的连接、设置修改和串流记录。</p></div></div>
+          <div id="logsView"></div>
+        </section>
       </div>
     </main>
   </div>
@@ -320,5 +336,6 @@
   <script src="app.js"></script>
   <script src="qr.js"></script>
   <script src="security.js"></script>
+  <script src="access.js"></script>
 </body>
 </html>

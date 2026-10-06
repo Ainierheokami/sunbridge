@@ -1,4 +1,5 @@
-// Set or reset the web login: start.bat / start.sh -> "设置或重置登录密码" (or `start.bat passwd`).
+// Reset the web login on the bridge machine: start.bat / start.sh -> "重置登录密码" (or `start.bat passwd`).
+// The account is normally created in the web page on first run (with the setup code).
 // Must be run on the bridge machine; it revokes every existing login session.
 import path from 'node:path';
 import readline from 'node:readline';

@@ -32,6 +32,7 @@
     code { color: var(--accent-text); }
     .warning { margin: 0 0 1.125rem; padding: 0.625rem 0.75rem; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-size: 0.875rem; line-height: 1.5; }
     .hint { margin: -0.25rem 0 1rem; color: var(--text-2); font-size: 0.875rem; line-height: 1.55; }
+    .setup-code { letter-spacing: 0.15em; text-transform: uppercase; }
     .code-input { letter-spacing: 0.3em; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; text-align: center; font-size: 1.375rem; }
     .link-button { width: auto; margin: 0.875rem 0 0; padding: 0.25rem 0; background: none; color: var(--accent-text); font-size: 0.875rem; font-weight: 500; }
     .link-button:hover { background: none; text-decoration: underline; }
@@ -43,9 +44,18 @@
   <main class="card">
     <div class="brand">
       <img src="assets/sunbridge-icon.svg" alt="" />
-      <div><strong>Sunbridge</strong><small>登录以继续</small></div>
+      <div><strong>Sunbridge</strong><small id="brandCaption">登录以继续</small></div>
     </div>
     <p class="warning" id="insecureWarning" hidden>当前连接没有加密（不是 HTTPS）：密码会以明文经过网络。请改用 HTTPS 地址访问。</p>
+    <form id="setupForm" autocomplete="off" hidden>
+      <p class="hint">第一次使用，请创建登录账户。设置码显示在运行 Sunbridge 的窗口里，也可以在那台电脑上运行 <code>start.bat status</code>（或 <code>./start.sh status</code>）查看。</p>
+      <label>设置码<input id="setupCode" class="code-input setup-code" autocomplete="off" required maxlength="16" placeholder="XXXX-XXXX" /></label>
+      <label>用户名<input id="setupUsername" value="admin" autocomplete="username" required maxlength="64" /></label>
+      <label>密码（至少 10 个字符）<input id="setupPassword" type="password" autocomplete="new-password" required minlength="10" maxlength="1024" /></label>
+      <label>再输入一次密码<input id="setupPassword2" type="password" autocomplete="new-password" required maxlength="1024" /></label>
+      <button id="setupSubmit" type="submit">创建账户</button>
+      <p class="message" id="setupMessage" role="alert" aria-live="polite"></p>
+    </form>
     <form id="loginForm" autocomplete="on">
       <label>用户名<input id="username" name="username" autocomplete="username" required maxlength="64" autofocus /></label>
       <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024" /></label>

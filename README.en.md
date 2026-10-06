@@ -45,7 +45,9 @@ Sunbridge runs on your own computer (usually the one running Sunshine) and turns
 - **Remote desktop mode**: absolute pointer, tap / drag / long-press / two-finger gestures, on-screen keyboard with full text input (including CJK).
 - **Game mode**: pointer lock with relative motion, gamepads with rumble.
 - **Glitch-free audio**: Opus stereo played through a jitter buffer with clock-drift correction.
-- **One script to manage it**: `start.bat` / `start.sh` sets the password, configures access (reverse proxy with multiple domains and a generated nginx config, your own certificate, self-signed, or local only), starts it and shows status.
+- **Set up in the browser**: create the account in the web page on first start; access, certificates and two-step verification are all web settings, and `start.bat` / `start.sh` only start the bridge and get you back in.
+- **Multiple entrypoints**: several ports at once, each with its own HTTPS and reverse-proxy setting (e.g. one for nginx on this machine, one reached through a router port forward). Certificates are picked by domain, and the allowed domains can be restricted.
+- **Logs**: sign-ins, refused connections (address not allowed, untrusted proxy, cross-site requests), settings changes and streams, filterable on the Logs page.
 - **Secure by default**: every page and API needs a login, optional two-step verification (authenticator app codes, separately for login, starting a stream and resuming a session), failed logins are rate-limited, cross-site requests are blocked, and pairing keys and account data are never served over the web.
 
 <p align="center">
@@ -75,11 +77,12 @@ cd sunbridge
 ./start.sh        # Windows: double-click start.bat
 ```
 
-From the menu:
+1. Choose **Start**. By default it listens on all networks, port 8091, HTTPS with a self-signed certificate, and prints the addresses and a **setup code**.
+2. Open `https://<this computer's IP>:8091/` in any browser, accept the certificate warning, and **create the account** with the setup code.
+3. Choose “Add host” and pair with the PIN shown in Sunshine's web UI.
+4. For domains, a reverse proxy or a router port forward, add entrypoints, certificates and allowed domains under **Access**. A change must be confirmed from the new address within 60 seconds or it is undone, so you cannot lock yourself out.
 
-1. **Set the login password** (only possible on this machine, never from the web).
-2. **Configure access**: reverse proxy (recommended; nginx / Caddy / cloudflared terminate HTTPS, multiple domains, nginx config written to `data/nginx.conf`), your own certificate (drop it into `data/certs/`), self-signed, or local only (`http://127.0.0.1:8091/`).
-3. **Start**, open the address shown, log in, choose “Add host” and pair with the PIN shown in Sunshine's web UI.
+The script keeps a few commands: `start`, `status` (addresses, setup code, recent warnings), `reset-network` (back to the default network settings when the page is unreachable), `passwd`, `logout-all`, `2fa-off`.
 
 > Browsers only enable video decoding, gamepads and pointer lock on HTTPS or localhost, so use HTTPS when connecting from other devices.
 
@@ -107,7 +110,7 @@ sunbridge/
 
 ## Environment variables (optional)
 
-The menu stores its settings in `data/config.json`; these override them: `SUNBRIDGE_PORT`, `SUNBRIDGE_BIND`, `SUNBRIDGE_TLS` (`cert` / `self-signed` / `off`), `SUNBRIDGE_TLS_CERT`, `SUNBRIDGE_TLS_KEY`, `SUNBRIDGE_TRUST_PROXY`, `SUNBRIDGE_TRUSTED_PROXIES`, `SUNBRIDGE_ALLOWED_ORIGINS`, `SUNBRIDGE_DATA_DIR`.
+Settings live in `data/config.json` and are edited in the web page. When the port / bind variables are set they define a single entrypoint and the web entrypoint settings become read-only: `SUNBRIDGE_PORT`, `SUNBRIDGE_BIND`, `SUNBRIDGE_TLS` (`off` disables HTTPS), `SUNBRIDGE_TLS_CERT`, `SUNBRIDGE_TLS_KEY`, `SUNBRIDGE_TRUST_PROXY`, `SUNBRIDGE_TRUSTED_PROXIES`, `SUNBRIDGE_ALLOWED_ORIGINS`, `SUNBRIDGE_DATA_DIR`.
 
 ## Browser support
 

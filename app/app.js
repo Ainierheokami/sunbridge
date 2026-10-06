@@ -25,6 +25,9 @@
     server: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M8 7h.01M8 17h.01M12 7h5M12 17h5"/></svg>',
     info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 10v6M12 7h.01"/></svg>',
     wifi: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 8.5a14 14 0 0 1 18 0M6.5 12a8.5 8.5 0 0 1 11 0M10 15.5a3.7 3.7 0 0 1 4 0M12 19h.01"/></svg>',
+    list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+    download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
     shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 19 6v5c0 4.3-2.4 7.7-7 10-4.6-2.3-7-5.7-7-10V6l7-3Z"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg>',
     copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>',
     x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>',
@@ -203,8 +206,12 @@
   };
 
   const renderStaticCopy = () => {
-    const nav = [t('nav.overview'), t('nav.hosts'), t('nav.network'), t('nav.settings'), t('nav.addHost')];
-    qsa('.nav-item > span:nth-child(2)').forEach((node, index) => { if (nav[index]) node.textContent = nav[index]; });
+    const navKeys = { overview: 'nav.overview', hosts: 'nav.hosts', network: 'nav.network', settings: 'nav.settings', access: 'nav.access', logs: 'nav.logs' };
+    qsa('.nav-item').forEach((item) => {
+      const key = item.dataset.viewTarget ? navKeys[item.dataset.viewTarget] : item.dataset.action === 'open-pair' ? 'nav.addHost' : null;
+      const label = qs('span:nth-child(2)', item);
+      if (key && label) label.textContent = t(key);
+    });
     setText('.nav-label:not(.nav-label-spaced)', t('nav.workspace'));
     setText('.nav-label-spaced', t('nav.preferences'));
     setText('.brand-subtitle', t('brand.subtitle'));
@@ -790,6 +797,7 @@
     state.activeView = viewName;
     qsa('.view').forEach((view) => view.classList.toggle('is-visible', view.dataset.view === viewName));
     qsa('[data-view-target]').forEach((item) => item.classList.toggle('is-active', item.dataset.viewTarget === viewName));
+    window.dispatchEvent(new CustomEvent('sunbridge:view', { detail: { view: viewName } }));
     const scroll = qs('.content-scroll'); if (scroll) scroll.scrollTo({ top: 0, behavior: 'smooth' });
   };
 

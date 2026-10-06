@@ -11,6 +11,12 @@ import crypto from 'node:crypto';
 import { URL } from 'node:url';
 import { ControlStream, encodeBrowserInput } from './control.mjs';
 import { createAuth } from './auth.mjs';
+import { createLog, LOG_CATEGORIES } from './log.mjs';
+import {
+  loadConfig as loadNetConfig, saveConfig as saveNetConfig, validateConfig, environmentEntrypoint, makeAddressMatcher, isLoopbackAddress,
+  hostAllowed, scanCertificates, pickCertificate, storeCertificate, deleteCertificate, nginxSnippet,
+} from './netconfig.mjs';
+import tls from 'node:tls';
 // The browser's media code (RTP / FEC / frame assembly) also runs here: the bridge assembles video frames itself.
 await import('./media.js');
 const Media = globalThis.SunbridgeMedia;
@@ -20,34 +26,15 @@ const ROOT = path.dirname(__filename);
 const DATA_DIR = process.env.SUNBRIDGE_DATA_DIR ? path.resolve(process.env.SUNBRIDGE_DATA_DIR) : path.join(ROOT, '..', 'data');  // <install>/data next to app/
 const IDENTITY_FILE = path.join(DATA_DIR, 'identity.json');
 const HOSTS_FILE = path.join(DATA_DIR, 'hosts.json');
-// Saved settings from `manage.bat` / `manage.sh` (scripts/manage.mjs); environment variables override them.
-const CONFIG = loadJson(path.join(DATA_DIR, 'config.json'), null) || {};
+// Network settings (entrypoints, allowed addresses) are edited in the web UI and stored in data/config.json;
+// see netconfig.mjs. SUNBRIDGE_* environment variables, when set, define a single entrypoint instead.
 const envList = (value) => (value === undefined ? null : String(value).split(',').map((item) => item.trim()).filter(Boolean));
-const PORT = Number(process.env.SUNBRIDGE_PORT || process.env.PORT || CONFIG.port || 8091);
-const BIND = process.env.SUNBRIDGE_BIND || CONFIG.bind || '127.0.0.1';
-const LOOPBACK_BIND = ['127.0.0.1', '::1', 'localhost'].includes(BIND);
-// Set when a reverse proxy / tunnel terminates TLS in front of the bridge (trusts X-Forwarded-*).
-const TRUST_PROXY = process.env.SUNBRIDGE_TRUST_PROXY !== undefined
-  ? ['1', 'true', 'yes'].includes(String(process.env.SUNBRIDGE_TRUST_PROXY).toLowerCase())
-  : CONFIG.trustProxy === true;
-// Addresses (IPs or CIDRs) of the reverse proxy. With TRUST_PROXY on, only these may connect at all, so
-// X-Forwarded-* cannot be forged even when the bridge listens on a LAN or Docker interface.
-const TRUSTED_PROXIES = envList(process.env.SUNBRIDGE_TRUSTED_PROXIES)
-  || (Array.isArray(CONFIG.trustedProxies) && CONFIG.trustedProxies.length ? CONFIG.trustedProxies : ['127.0.0.1', '::1']);
-const TLS_CERT_FILE = process.env.SUNBRIDGE_TLS_CERT || CONFIG.tlsCert || '';
-const TLS_KEY_FILE = process.env.SUNBRIDGE_TLS_KEY || CONFIG.tlsKey || '';
-const TLS_HOSTNAMES = envList(process.env.SUNBRIDGE_TLS_HOSTNAMES) || (Array.isArray(CONFIG.tlsHostnames) ? CONFIG.tlsHostnames : []);
-// TLS: "cert" (your own certificate + key PEM files, e.g. for a domain), "self-signed", or "off".
-// The legacy value "auto" means cert when cert files are configured, otherwise self-signed. HTTPS is
-// the default when listening beyond loopback without a trusted proxy, because WebCodecs, gamepads
-// and pointer lock only work in a secure context.
-const TLS_MODE = (() => {
-  const raw = String(process.env.SUNBRIDGE_TLS || CONFIG.tls || '').toLowerCase();
-  if (['off', 'cert', 'self-signed'].includes(raw)) return raw;
-  if (raw === 'auto' || TLS_CERT_FILE || (!LOOPBACK_BIND && !TRUST_PROXY)) return TLS_CERT_FILE ? 'cert' : 'self-signed';
-  return 'off';
-})();
-const EXTRA_ORIGINS = envList(process.env.SUNBRIDGE_ALLOWED_ORIGINS) || (Array.isArray(CONFIG.allowedOrigins) ? CONFIG.allowedOrigins : []);
+const LOG = createLog(DATA_DIR);
+const ENV_ENTRYPOINT = environmentEntrypoint();
+let netConfig = loadNetConfig(DATA_DIR);
+if (ENV_ENTRYPOINT) netConfig = { ...netConfig, entrypoints: [ENV_ENTRYPOINT] };
+const ENV_CERTIFICATES = process.env.SUNBRIDGE_TLS_CERT && process.env.SUNBRIDGE_TLS_KEY ? [{ cert: process.env.SUNBRIDGE_TLS_CERT, key: process.env.SUNBRIDGE_TLS_KEY }] : [];
+const EXTRA_ORIGINS = envList(process.env.SUNBRIDGE_ALLOWED_ORIGINS) || netConfig.allowedOrigins;
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/theme.js', '/assets/sunbridge-icon.svg', '/favicon.ico']);
 const VERSION = '0.2.0';
 const DEFAULT_HTTP_PORT = 47989;
@@ -271,7 +258,11 @@ function utcTime(date) {
 function tlsHostnames() {
   const names = new Set(['localhost', '127.0.0.1', '::1', os.hostname().toLowerCase()]);
   for (const list of Object.values(os.networkInterfaces())) for (const item of list || []) if (!item.internal) names.add(item.address);
-  for (const name of TLS_HOSTNAMES) if (String(name).trim()) names.add(String(name).trim().toLowerCase());
+  // Allowed addresses (without port; wildcards cannot go in a self-signed certificate) and names carried over from v1.
+  for (const pattern of [...netConfig.allowedHosts, ...netConfig.certificateNames]) {
+    const name = String(pattern).toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+    if (name && !name.startsWith('*.')) names.add(name);
+  }
   return [...names].sort();
 }
 
@@ -322,35 +313,53 @@ function makeServerCertificate(hostnames) {
   };
 }
 
-// Your own certificate (e.g. fullchain.pem + privkey.pem for a domain). Throws a readable error when
-// the files are missing or the key does not belong to the certificate.
-function readOwnCertificate() {
-  if (!TLS_CERT_FILE || !TLS_KEY_FILE) throw new Error('tls=cert 需要同时配置证书 (tlsCert / SUNBRIDGE_TLS_CERT) 和私钥 (tlsKey / SUNBRIDGE_TLS_KEY)，可运行 start.bat / start.sh重新配置');
-  const cert = fs.readFileSync(TLS_CERT_FILE);
-  const key = fs.readFileSync(TLS_KEY_FILE);
-  const x509 = new crypto.X509Certificate(cert);
-  if (!x509.checkPrivateKey(crypto.createPrivateKey(key))) throw new Error(`证书和私钥不匹配：${TLS_CERT_FILE} / ${TLS_KEY_FILE}`);
-  const chainLength = (cert.toString('utf8').match(/-----BEGIN CERTIFICATE-----/g) || []).length;
-  const names = (x509.subjectAltName || '').split(', ').filter((item) => item.startsWith('DNS:')).map((item) => item.slice(4));
-  return { cert, key, x509, names, incompleteChain: chainLength < 2 && x509.issuer !== x509.subject };
-}
-
-function loadTlsOptions() {
-  if (TLS_MODE === 'off') return null;
-  if (TLS_MODE === 'cert') {
-    const own = readOwnCertificate();
-    return { cert: own.cert, key: own.key, own, source: TLS_CERT_FILE };
-  }
+// Self-signed certificate for HTTPS entrypoints when no certificate in data/certs matches the requested name.
+// Regenerated when the machine's addresses or the allowed addresses change, or a week before it expires.
+function loadSelfSigned({ force = false } = {}) {
   const file = path.join(DATA_DIR, 'tls.json');
   const hostnames = tlsHostnames();
-  const stored = loadJson(file, null);
+  const stored = force ? null : loadJson(file, null);
   const valid = stored?.cert && stored?.key && JSON.stringify(stored.hostnames) === JSON.stringify(hostnames) && (() => {
     try { return new Date(new crypto.X509Certificate(stored.cert).validTo).getTime() - Date.now() > 7 * 24 * 60 * 60 * 1000; } catch { return false; }
   })();
-  if (valid) return { cert: stored.cert, key: stored.key, source: `self-signed (${file})` };
+  if (valid) return { cert: stored.cert, key: stored.key, hostnames };
   const generated = makeServerCertificate(hostnames);
   saveJson(file, { hostnames, ...generated, createdAt: new Date().toISOString() });
-  return { ...generated, source: `self-signed, newly generated (${file})` };
+  LOG.info('system', 'self-signed-generated', `已生成自签名证书（${hostnames.length} 个地址）`, { names: hostnames.join(', ') });
+  return { ...generated, hostnames };
+}
+
+// Certificates: everything in data/certs plus the self-signed fallback, as TLS secure contexts for SNI.
+const certStore = { certificates: [], problems: [], contexts: new Map(), selfSigned: null, selfSignedContext: null, signature: '' };
+function refreshCertificates({ forceSelfSigned = false } = {}) {
+  const { certificates, problems } = scanCertificates(DATA_DIR, [...netConfig.extraCertificates, ...ENV_CERTIFICATES]);
+  const signature = certificates.map((item) => item.fingerprint).sort().join(',');
+  if (signature !== certStore.signature) {
+    const before = new Set(certStore.certificates.map((item) => item.fingerprint));
+    for (const item of certificates) {
+      if (before.has(item.fingerprint)) continue;
+      LOG.info('system', 'certificate-loaded', `已加载证书：${item.names.join(', ')}（到期 ${item.validTo.slice(0, 10)}）`, { file: path.basename(item.certFile) });
+      if (item.incompleteChain) LOG.warn('system', 'certificate-chain', `证书 ${path.basename(item.certFile)} 缺少中间证书，部分设备（尤其手机）会提示不受信任，请改用 fullchain / bundle 证书`);
+    }
+    certStore.contexts = new Map(certificates.map((item) => [item.fingerprint, tls.createSecureContext({ cert: item.cert, key: item.key, minVersion: 'TLSv1.2' })]));
+  }
+  for (const problem of problems) LOG.warn('system', 'certificate-problem', `证书文件无法使用：${problem.file}（${problem.error}）`, {}, `cert-problem:${problem.file}:${problem.error}`);
+  for (const item of certificates) {
+    const days = Math.floor((new Date(item.validTo).getTime() - Date.now()) / 86400000);
+    if (days < 14) LOG.warn('system', 'certificate-expiring', days < 0 ? `证书已过期：${item.names.join(', ')}` : `证书将在 ${days} 天后过期：${item.names.join(', ')}`, {}, `cert-expiry:${item.fingerprint}:${new Date().toISOString().slice(0, 10)}`);
+  }
+  certStore.certificates = certificates;
+  certStore.problems = problems;
+  certStore.signature = signature;
+  const selfSigned = loadSelfSigned({ force: forceSelfSigned });
+  if (!certStore.selfSigned || certStore.selfSigned.cert !== selfSigned.cert) {
+    certStore.selfSigned = selfSigned;
+    certStore.selfSignedContext = tls.createSecureContext({ cert: selfSigned.cert, key: selfSigned.key, minVersion: 'TLSv1.2' });
+  }
+}
+function secureContextFor(servername) {
+  const picked = pickCertificate(certStore.certificates, servername);
+  return (picked && certStore.contexts.get(picked.fingerprint)) || certStore.selfSignedContext;
 }
 
 function makeClientCertificate(keyPair) {
@@ -436,55 +445,7 @@ function loadIdentity() {
 }
 
 const identity = loadIdentity();
-function makeAddressMatcher(entries) {
-  const blockList = new net.BlockList();
-  const family = (address) => (net.isIPv4(address) ? 'ipv4' : net.isIPv6(address) ? 'ipv6' : null);
-  for (const entry of entries) {
-    const [address, prefix] = String(entry).trim().split('/');
-    const type = family(address);
-    const bits = Number(prefix);
-    if (!type || (prefix !== undefined && !(Number.isInteger(bits) && bits >= 0 && bits <= (type === 'ipv4' ? 32 : 128)))) {
-      throw new Error(`反向代理地址无效：${entry}（应为 IP 或 CIDR，如 172.16.0.0/12）`);
-    }
-    if (prefix === undefined) blockList.addAddress(address, type);
-    else blockList.addSubnet(address, bits, type);
-  }
-  return (remote) => {
-    const address = String(remote || '').replace(/^::ffff:/, '');
-    const type = family(address);
-    return Boolean(type) && blockList.check(address, type);
-  };
-}
-
-let isTrustedProxy;
-try {
-  isTrustedProxy = makeAddressMatcher(TRUSTED_PROXIES);
-} catch (error) {
-  console.error(safeError(error));
-  process.exit(1);
-}
-
-// Log each refused address once so the user can see which IP their proxy actually connects from.
-const refusedProxyAddresses = new Set();
-function refuseUntrustedProxy(socket) {
-  if (!TRUST_PROXY) return false;
-  const remote = String(socket?.remoteAddress || '').replace(/^::ffff:/, '');
-  if (isTrustedProxy(remote)) return false;
-  if (!refusedProxyAddresses.has(remote) && refusedProxyAddresses.size < 100) {
-    refusedProxyAddresses.add(remote);
-    console.warn(`[proxy] 拒绝来自 ${remote} 的连接：不在反向代理地址列表（${TRUSTED_PROXIES.join(', ')}）里。如果这是你的 nginx，把它加到 config.json 的 trustedProxies。`);
-  }
-  return true;
-}
-
-let tlsOptions;
-try {
-  tlsOptions = loadTlsOptions();
-} catch (error) {
-  console.error(`HTTPS 证书加载失败：${safeError(error)}`);
-  process.exit(1);
-}
-const auth = createAuth({ dataDir: DATA_DIR, trustProxy: TRUST_PROXY, secure: Boolean(tlsOptions), extraOrigins: EXTRA_ORIGINS });
+const auth = createAuth({ dataDir: DATA_DIR, extraOrigins: EXTRA_ORIGINS });
 let hosts = loadJson(HOSTS_FILE, {});
 if (!hosts || typeof hosts !== 'object' || Array.isArray(hosts)) hosts = {};
 let activeSession = null;
@@ -1975,7 +1936,7 @@ function acceptMediaGateway(request, socket, head) {
     return;
   }
   let url;
-  try { url = new URL(request.url || MEDIA_GATEWAY_PATH, `http://${request.headers.host || `${BIND}:${PORT}`}`); } catch {
+  try { url = new URL(request.url || MEDIA_GATEWAY_PATH, 'http://localhost'); } catch {
     writeUpgradeError(socket, 400, 'Invalid WebSocket URL');
     return;
   }
@@ -2931,18 +2892,20 @@ function authErrorMessage(code) {
     AUTH_REQUIRED: '请先登录',
     AUTH_INVALID_CREDENTIALS: '用户名或密码错误',
     AUTH_RATE_LIMITED: '登录失败次数过多，请稍后再试',
-    AUTH_SETUP_REQUIRED: '尚未设置登录密码，请在运行 Sunbridge 的电脑上运行 start.bat（或 ./start.sh）设置密码',
+    AUTH_SETUP_REQUIRED: '尚未创建账户，请先在本页用设置码创建',
+    AUTH_SETUP_CODE_INVALID: '设置码不正确，请查看运行 Sunbridge 的窗口或运行 start.bat / ./start.sh status',
+    AUTH_ALREADY_SET_UP: '账户已经创建，请直接登录',
     AUTH_2FA_REQUIRED: '需要输入两步验证码',
     AUTH_2FA_INVALID: '验证码错误或已经用过',
     AUTH_2FA_EXPIRED: '验证已超时，请重新开始',
     AUTH_2FA_NOT_ENABLED: '尚未启用两步验证',
     AUTH_2FA_ALREADY_ENABLED: '两步验证已经启用',
-    AUTH_INSECURE_TRANSPORT: '当前连接没有加密（不是 HTTPS），不能在这里设置两步验证',
+    AUTH_INSECURE_TRANSPORT: '当前连接没有加密（不是 HTTPS），为防止泄露，这个操作只能通过 HTTPS 地址或在本机进行',
   }[code] || '认证失败';
 }
 
 const AUTH_STATUS_CODES = {
-  AUTH_REQUIRED: 401, AUTH_INVALID_CREDENTIALS: 401, AUTH_2FA_INVALID: 401, AUTH_2FA_EXPIRED: 401,
+  AUTH_REQUIRED: 401, AUTH_INVALID_CREDENTIALS: 401, AUTH_2FA_INVALID: 401, AUTH_2FA_EXPIRED: 401, AUTH_SETUP_CODE_INVALID: 401, AUTH_ALREADY_SET_UP: 409,
   AUTH_RATE_LIMITED: 429, AUTH_SETUP_REQUIRED: 503, AUTH_WEAK_PASSWORD: 400,
   AUTH_2FA_REQUIRED: 403, AUTH_2FA_NOT_ENABLED: 409, AUTH_2FA_ALREADY_ENABLED: 409, AUTH_INSECURE_TRANSPORT: 403,
 };
@@ -2978,19 +2941,32 @@ function applySecurityHeaders(request, response) {
     `connect-src 'self'${host ? ` ${secure ? 'wss' : 'ws'}://${host}` : ''}`, "worker-src 'self' blob:", "object-src 'none'",
     "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
   ].join('; '));
-  if (TRUST_PROXY && !secure) warnPlainProxyRequest(request);
+  if (request.sunbridgeEntry?.proxy?.enabled && !secure) warnPlainProxyRequest(request);
 }
 
 // Reverse proxy mode relies on the proxy for HTTPS. A request it forwarded as plain HTTP (or without
 // X-Forwarded-Proto) means passwords and codes crossed the network unencrypted, unless it is local.
-let plainProxyWarned = false;
 function warnPlainProxyRequest(request) {
-  if (plainProxyWarned) return;
   const ip = auth.clientIp(request);
-  if (ip === '::1' || ip.startsWith('127.')) return;
-  plainProxyWarned = true;
+  if (isLoopbackAddress(ip)) return;
   const proto = String(request.headers['x-forwarded-proto'] || '').trim() || '（未设置）';
-  console.warn(`[proxy] 警告：反向代理转发来的请求不是 HTTPS（X-Forwarded-Proto: ${proto}，来自 ${ip}）。请确认代理监听 HTTPS 并设置 proxy_set_header X-Forwarded-Proto $scheme；否则登录密码、验证码和串流都是明文，Cookie 也不会带 Secure。`);
+  LOG.warn('access', 'proxy-plain-http', `反向代理转发来的请求不是 HTTPS（X-Forwarded-Proto: ${proto}）。请确认代理监听 HTTPS 并设置 proxy_set_header X-Forwarded-Proto $scheme，否则密码和串流都是明文`, { ip, host: auth.effectiveHost(request), entry: entryLabel(request.sunbridgeEntry) }, `plain-proxy:${request.sunbridgeEntry?.id}`);
+}
+
+const entryLabel = (entry) => (entry ? `${entry.name || entry.id} ${entry.https ? 'https' : 'http'}://${entry.bind.includes(':') ? `[${entry.bind}]` : entry.bind}:${entry.port}` : '');
+// Who / where, for log entries about a request.
+const requestFields = (request) => ({ ip: auth.clientIp(request), host: auth.effectiveHost(request), entry: entryLabel(request.sunbridgeEntry), userAgent: String(request.headers['user-agent'] || '').slice(0, 120) });
+
+// Failed sign-ins and code checks go to the log (folded per address and reason).
+const AUTH_FAILURE_TEXT = {
+  AUTH_INVALID_CREDENTIALS: '用户名或密码错误', AUTH_2FA_INVALID: '两步验证码错误', AUTH_2FA_EXPIRED: '两步验证超时',
+  AUTH_RATE_LIMITED: '失败次数过多，已暂时锁定', AUTH_SETUP_CODE_INVALID: '设置码错误', AUTH_INSECURE_TRANSPORT: '连接未加密，已拒绝',
+};
+function logAuthFailure(request, result, action, extra = {}) {
+  const text = AUTH_FAILURE_TEXT[result.errorCode];
+  if (!text) return;
+  const fields = { ...requestFields(request), ...extra, action };
+  LOG.warn('auth', 'auth-failed', `${text}（${action}）`, fields, `auth:${result.errorCode}:${fields.ip}:${action}`);
 }
 
 async function handleApi(request, response, pathname) {
@@ -3014,10 +2990,24 @@ async function handleApi(request, response, pathname) {
         jsonResponse(response, 401, { ok: false, errorCode: result.errorCode, challenge: result.challenge, error: authErrorMessage(result.errorCode) });
         return;
       }
+      logAuthFailure(request, result, 'login', { username: typeof body.username === 'string' ? body.username.slice(0, 64) : '' });
       authFailure(response, result);
       return;
     }
-    console.log(`[auth] login ${result.username} from ${auth.clientIp(request)}`);
+    LOG.info('auth', 'login', `${result.username} 登录成功`, requestFields(request));
+    response.setHeader('Set-Cookie', result.cookie);
+    jsonResponse(response, 200, { ok: true, username: result.username });
+    return;
+  }
+  // First run: create the account from the web page with the setup code shown on the bridge's console.
+  if (pathname === '/api/auth/setup' && request.method === 'POST') {
+    const result = await auth.createAccount(request, body.code, body.username, body.password);
+    if (!result.ok) {
+      logAuthFailure(request, result, 'setup');
+      authFailure(response, result);
+      return;
+    }
+    LOG.info('auth', 'account-created', `已在网页上创建账户 ${result.username}`, requestFields(request));
     response.setHeader('Set-Cookie', result.cookie);
     jsonResponse(response, 200, { ok: true, username: result.username });
     return;
@@ -3025,16 +3015,17 @@ async function handleApi(request, response, pathname) {
   if (pathname === '/api/auth/login/2fa' && request.method === 'POST') {
     const result = await auth.loginWithCode(request, body.challenge, body.code);
     if (!result.ok) {
-      if (result.errorCode === 'AUTH_2FA_INVALID') console.warn(`[auth] wrong two-step code from ${auth.clientIp(request)}`);
+      logAuthFailure(request, result, 'login-2fa');
       authFailure(response, result);
       return;
     }
-    console.log(`[auth] login ${result.username} from ${auth.clientIp(request)} (two-step: ${result.method})`);
+    LOG.info('auth', 'login', `${result.username} 登录成功（两步验证：${result.method === 'recovery' ? `恢复码，剩余 ${result.recoveryRemaining} 个` : '验证码'}）`, requestFields(request));
     response.setHeader('Set-Cookie', result.cookie);
     jsonResponse(response, 200, { ok: true, username: result.username, recoveryRemaining: result.recoveryRemaining ?? null });
     return;
   }
   if (pathname === '/api/auth/logout' && request.method === 'POST') {
+    if (auth.sessionFor(request)) LOG.info('auth', 'logout', '已退出登录', requestFields(request));
     response.setHeader('Set-Cookie', auth.logout(request));
     jsonResponse(response, 200, { ok: true });
     return;
@@ -3042,14 +3033,20 @@ async function handleApi(request, response, pathname) {
   if (pathname === '/api/auth/password' && request.method === 'POST') {
     const result = await auth.changePassword(request, body.currentPassword, body.newPassword);
     if (!result.ok) {
+      logAuthFailure(request, result, 'password');
       authFailure(response, result);
       return;
     }
+    LOG.info('auth', 'password-changed', '已修改登录密码，其他设备已退出', requestFields(request));
     jsonResponse(response, 200, { ok: true });
     return;
   }
   if (!auth.sessionFor(request)) {
     jsonResponse(response, 401, { ok: false, errorCode: 'AUTH_REQUIRED', error: authErrorMessage('AUTH_REQUIRED') });
+    return;
+  }
+  if (pathname.startsWith('/api/settings/') || pathname === '/api/logs') {
+    await handleSettingsApi(request, response, pathname, body);
     return;
   }
   if (pathname === '/api/auth/2fa' && request.method === 'GET') {
@@ -3072,8 +3069,9 @@ async function handleApi(request, response, pathname) {
       jsonResponse(response, 404, { ok: false, errorCode: 'BRIDGE_ERROR', error: 'API 路径不存在' });
       return;
     }
-    if (!result.ok) { authFailure(response, result); return; }
-    if (['enable', 'disable', 'policy'].includes(action)) console.log(`[auth] two-step verification ${action} from ${auth.clientIp(request)}`);
+    if (!result.ok) { logAuthFailure(request, result, `2fa-${action}`); authFailure(response, result); return; }
+    const twoFactorMessages = { enable: '已启用两步验证，其他设备已退出', disable: '已关闭两步验证', policy: '已修改两步验证的使用场景', 'recovery-codes': '已重新生成恢复码', verify: '两步验证通过' };
+    if (twoFactorMessages[action]) LOG.info(action === 'verify' ? 'auth' : 'settings', `2fa-${action}`, twoFactorMessages[action], requestFields(request));
     jsonResponse(response, 200, result);
     return;
   }
@@ -3154,6 +3152,7 @@ async function handleApi(request, response, pathname) {
     if (!requireTwoFactor(request, response, 'stream')) return;
     const session = await launchHost({ ...body, clientAddress: auth.clientIp(request) });
     auth.grantStream(request, session?.id);
+    LOG.info('stream', 'launch', `开始串流：${session?.appName || ''} · ${session?.hostName || ''}`, requestFields(request));
     jsonResponse(response, 200, { ok: true, session });
     return;
   }
@@ -3171,6 +3170,7 @@ async function handleApi(request, response, pathname) {
   }
   if (pathname === '/api/bridge/stop' && request.method === 'POST') {
     const result = await stopSession();
+    if (result?.session) LOG.info('stream', 'stop', `结束串流：${result.session.appName || ''} · ${result.session.hostName || ''}`, requestFields(request));
     jsonResponse(response, 200, { ok: true, ...result });
     return;
   }
@@ -3179,7 +3179,7 @@ async function handleApi(request, response, pathname) {
 
 // Only the web client itself is served. Everything else in this directory (data with the pairing
 // key, password hashes and TLS keys, certs/, scripts, tests, backups, server sources) must never be readable.
-const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/qr.js', '/security.js', '/theme.js', '/favicon.ico']);
+const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/favicon.ico']);
 const isServableStatic = (requestedPath) => STATIC_FILES.has(requestedPath) || /^\/assets\/[\w.-]+\.(png|jpe?g|svg|webp|ico)$/i.test(requestedPath);
 
 function serveStatic(request, response, pathname) {
@@ -3207,18 +3207,219 @@ function serveStatic(request, response, pathname) {
   });
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Settings → Access (entrypoints, allowed addresses, certificates) and Logs
+// ---------------------------------------------------------------------------------------------------
+const NETWORK_CONFIRM_MS = 60 * 1000;
+let pendingNetworkChange = null; // { previous, expiresAt, timer }
+
+function lanAddresses() {
+  const list = [];
+  for (const items of Object.values(os.networkInterfaces())) {
+    for (const item of items || []) if (!item.internal && !item.address.startsWith('169.254.') && !item.address.startsWith('fe80')) list.push(item.address);
+  }
+  return list;
+}
+
+// Addresses a browser can use for an entrypoint (for the console and the settings page).
+function entrypointUrls(entry) {
+  const scheme = entry.https ? 'https' : 'http';
+  const suffix = (scheme === 'https' && entry.port === 443) || (scheme === 'http' && entry.port === 80) ? '' : `:${entry.port}`;
+  const wrap = (host) => (host.includes(':') ? `[${host}]` : host);
+  const hosts = ['0.0.0.0', '::'].includes(entry.bind) ? ['127.0.0.1', ...lanAddresses().filter((ip) => entry.bind === '::' || !ip.includes(':'))] : [entry.bind];
+  return hosts.map((host) => `${scheme}://${wrap(host)}${suffix}/`);
+}
+
+function networkSnapshot(request) {
+  return {
+    config: { entrypoints: netConfig.entrypoints, allowedHosts: netConfig.allowedHosts },
+    locked: Boolean(ENV_ENTRYPOINT),
+    listeners: netConfig.entrypoints.map((entry) => {
+      const state = listeners.get(entry.id);
+      return { id: entry.id, state: state?.state || 'stopped', error: state?.error || null, urls: entrypointUrls(entry) };
+    }),
+    current: {
+      entryId: request.sunbridgeEntry?.id || null, host: auth.effectiveHost(request), secure: auth.isSecureRequest(request),
+      clientIp: auth.clientIp(request), viaProxy: request.sunbridgeEntry?.proxy?.enabled === true, remoteAddress: String(request.socket?.remoteAddress || '').replace(/^::ffff:/, ''),
+    },
+    pending: pendingNetworkChange ? { expiresAt: pendingNetworkChange.expiresAt } : null,
+    machine: { hostname: os.hostname(), addresses: lanAddresses() },
+  };
+}
+
+// Can this process bind bind:port right now (ports it already holds count as free)?
+function portAvailable(bind, port) {
+  for (const state of listeners.values()) if (state.entry.port === port && state.state === 'listening') return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', (error) => resolve(error.code === 'EADDRINUSE' ? `端口 ${port} 已被其他程序占用` : error.code === 'EACCES' ? `没有权限监听端口 ${port}（1024 以下的端口通常需要管理员权限）` : error.code === 'EADDRNOTAVAIL' ? `这台电脑没有地址 ${bind}` : error.message));
+    probe.listen(port, bind, () => probe.close(() => resolve(true)));
+  });
+}
+
+async function applyNetworkConfig(next) {
+  netConfig = { ...netConfig, ...next };
+  refreshCertificates();
+  const results = await reconcileListeners(netConfig.entrypoints);
+  return results;
+}
+
+function revertNetworkChange(why) {
+  const pending = pendingNetworkChange;
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingNetworkChange = null;
+  saveNetConfig(DATA_DIR, { ...netConfig, ...pending.previous });
+  void applyNetworkConfig(pending.previous).then(() => {
+    LOG.warn('settings', 'network-reverted', why === 'timeout' ? '网络设置在 60 秒内没有确认，已恢复为修改前的设置' : '已撤销刚才的网络设置修改');
+  });
+}
+
+async function handleSettingsApi(request, response, pathname, body) {
+  const fields = requestFields(request);
+  if (pathname === '/api/logs' && request.method === 'GET') {
+    const url = new URL(request.url || '/', 'http://localhost');
+    const category = LOG_CATEGORIES.includes(url.searchParams.get('category')) ? url.searchParams.get('category') : null;
+    const level = url.searchParams.get('level') === 'warn' ? 'warn' : null;
+    const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 300));
+    jsonResponse(response, 200, { ok: true, entries: LOG.list({ category, level, limit, before: url.searchParams.get('before') || null }) });
+    return;
+  }
+  if (pathname === '/api/settings/network' && request.method === 'GET') {
+    jsonResponse(response, 200, { ok: true, ...networkSnapshot(request) });
+    return;
+  }
+  if (pathname === '/api/settings/network/confirm' && request.method === 'POST') {
+    if (pendingNetworkChange) {
+      clearTimeout(pendingNetworkChange.timer);
+      pendingNetworkChange = null;
+      LOG.info('settings', 'network-confirmed', '已确认新的网络设置', fields);
+    }
+    jsonResponse(response, 200, { ok: true, ...networkSnapshot(request) });
+    return;
+  }
+  if (pathname === '/api/settings/network/revert' && request.method === 'POST') {
+    revertNetworkChange('manual');
+    jsonResponse(response, 200, { ok: true });
+    return;
+  }
+  if (pathname === '/api/settings/nginx' && request.method === 'POST') {
+    const entry = netConfig.entrypoints.find((item) => item.id === body.entryId) || netConfig.entrypoints.find((item) => item.proxy.enabled) || netConfig.entrypoints[0];
+    const domains = (Array.isArray(body.domains) ? body.domains : netConfig.allowedHosts).map((item) => String(item).replace(/:\d+$/, '')).filter((item) => /^[a-z0-9.*-]+$/i.test(item) && !net.isIP(item));
+    jsonResponse(response, 200, { ok: true, text: nginxSnippet(entry, [...new Set(domains)], Number(body.publicPort) || 443) });
+    return;
+  }
+  if (pathname === '/api/settings/certificates' && request.method === 'GET') {
+    refreshCertificates();
+    const self = new crypto.X509Certificate(certStore.selfSigned.cert);
+    jsonResponse(response, 200, {
+      ok: true,
+      directory: path.join(DATA_DIR, 'certs'),
+      certificates: certStore.certificates.map(({ id, names, issuer, validFrom, validTo, incompleteChain, certFile }) => ({ id, names, issuer, validFrom, validTo, incompleteChain, file: path.basename(certFile), removable: path.dirname(certFile) === path.join(DATA_DIR, 'certs') })),
+      problems: certStore.problems,
+      selfSigned: { names: certStore.selfSigned.hostnames, validTo: new Date(self.validTo).toISOString(), fingerprint: self.fingerprint256 },
+    });
+    return;
+  }
+  if (pathname === '/api/settings/certificates/self-signed.crt' && request.method === 'GET') {
+    response.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Content-Disposition': 'attachment; filename="sunbridge-self-signed.crt"', 'Cache-Control': 'no-store' });
+    response.end(certStore.selfSigned.cert);
+    return;
+  }
+  // Everything below changes how the bridge can be reached: re-enter the password.
+  if (request.method !== 'POST') { jsonResponse(response, 404, { ok: false, errorCode: 'BRIDGE_ERROR', error: 'API 路径不存在' }); return; }
+  const check = await auth.verifyPassword(request, body.password);
+  if (!check.ok) { logAuthFailure(request, check, pathname.replace('/api/settings/', 'settings-')); authFailure(response, check); return; }
+
+  if (pathname === '/api/settings/network') {
+    if (ENV_ENTRYPOINT) { jsonResponse(response, 409, { ok: false, errorCode: 'NETWORK_LOCKED', error: '入口由环境变量（SUNBRIDGE_PORT 等）指定，不能在网页上修改' }); return; }
+    if (pendingNetworkChange) { jsonResponse(response, 409, { ok: false, errorCode: 'NETWORK_PENDING', error: '请先确认或撤销上一次的网络设置修改' }); return; }
+    const { config, errors } = validateConfig({ ...netConfig, entrypoints: body.config?.entrypoints, allowedHosts: body.config?.allowedHosts });
+    if (errors.length) { jsonResponse(response, 400, { ok: false, errorCode: 'NETWORK_INVALID', error: errors.join('；'), errors }); return; }
+    for (const entry of config.entrypoints) {
+      const available = await portAvailable(entry.bind, entry.port);
+      if (available !== true) { jsonResponse(response, 400, { ok: false, errorCode: 'NETWORK_INVALID', error: `${entry.name || entry.bind}:${entry.port}：${available}` }); return; }
+    }
+    const previous = { entrypoints: netConfig.entrypoints, allowedHosts: netConfig.allowedHosts };
+    const next = { entrypoints: config.entrypoints, allowedHosts: config.allowedHosts };
+    saveNetConfig(DATA_DIR, { ...netConfig, ...next });
+    pendingNetworkChange = { previous, expiresAt: Date.now() + NETWORK_CONFIRM_MS, timer: setTimeout(() => revertNetworkChange('timeout'), NETWORK_CONFIRM_MS) };
+    pendingNetworkChange.timer.unref?.();
+    LOG.info('settings', 'network-changed', `网络设置已修改：${next.entrypoints.map(entryLabel).join('；')}；允许的地址：${next.allowedHosts.join(', ') || '不限'}（60 秒内未确认将自动恢复）`, fields);
+    jsonResponse(response, 200, { ok: true, pending: { expiresAt: pendingNetworkChange.expiresAt }, urls: next.entrypoints.map((entry) => ({ id: entry.id, urls: entrypointUrls(entry) })) });
+    // Apply after the response is out: the connection carrying it may belong to an entrypoint being replaced.
+    setTimeout(() => {
+      void applyNetworkConfig(next).then((results) => {
+        const failed = results.filter((item) => !item.ok);
+        if (failed.length) revertNetworkChange('failed');
+      });
+    }, 400);
+    return;
+  }
+  if (pathname === '/api/settings/certificates/upload') {
+    try {
+      const id = storeCertificate(DATA_DIR, body.cert, body.key);
+      refreshCertificates();
+      LOG.info('settings', 'certificate-uploaded', `已上传证书 ${id}`, fields);
+      jsonResponse(response, 200, { ok: true, id });
+    } catch (error) {
+      jsonResponse(response, 400, { ok: false, errorCode: 'CERTIFICATE_INVALID', error: safeError(error) });
+    }
+    return;
+  }
+  if (pathname === '/api/settings/certificates/delete') {
+    try {
+      deleteCertificate(DATA_DIR, String(body.id || ''));
+      refreshCertificates();
+      LOG.info('settings', 'certificate-deleted', `已删除证书 ${body.id}`, fields);
+      jsonResponse(response, 200, { ok: true });
+    } catch (error) {
+      jsonResponse(response, 400, { ok: false, errorCode: 'CERTIFICATE_INVALID', error: safeError(error) });
+    }
+    return;
+  }
+  if (pathname === '/api/settings/certificates/self-signed/regenerate') {
+    refreshCertificates({ forceSelfSigned: true });
+    LOG.info('settings', 'self-signed-regenerated', '已重新生成自签名证书', fields);
+    jsonResponse(response, 200, { ok: true });
+    return;
+  }
+  jsonResponse(response, 404, { ok: false, errorCode: 'BRIDGE_ERROR', error: 'API 路径不存在' });
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Requests and listeners
+// ---------------------------------------------------------------------------------------------------
+// The checks every request and WebSocket goes through before anything else. Returns a refusal { status, text }.
+function gate(request) {
+  const entry = request.sunbridgeEntry;
+  const remote = String(request.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  if (entry?.proxy?.enabled && !listeners.get(entry.id)?.isTrustedProxy(remote)) {
+    LOG.warn('access', 'proxy-untrusted', `拒绝连接：${remote} 不在入口“${entry.name || entry.id}”的反向代理地址列表里。如果这是你的代理，请在“访问设置”里把它加入代理地址`, { ip: remote, host: String(request.headers.host || ''), entry: entryLabel(entry) }, `proxy:${entry.id}:${remote}`);
+    return { status: 403, text: 'Forbidden: only the configured reverse proxy may connect to this entrypoint.\n' };
+  }
+  const host = auth.effectiveHost(request);
+  if (!hostAllowed(netConfig.allowedHosts, host, auth.isSecureRequest(request) ? 443 : 80)) {
+    LOG.warn('access', 'host-not-allowed', `拒绝访问：地址 ${host || '（空）'} 不在允许的地址列表里`, requestFields(request), `host:${host}:${auth.clientIp(request)}`);
+    return { status: 421, text: `This address (${host}) is not allowed. Add it in Settings → Access on the bridge.\n此地址未被允许访问，请在 Sunbridge 的“访问设置”里添加。\n` };
+  }
+  return null;
+}
+
 const handleRequest = async (request, response) => {
-  if (refuseUntrustedProxy(request.socket)) {
-    response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-    response.end('Forbidden: only the configured reverse proxy may connect to this bridge.\n');
+  const refused = gate(request);
+  if (refused) {
+    response.writeHead(refused.status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.end(refused.text);
     return;
   }
   try {
     applySecurityHeaders(request, response);
-    const url = new URL(request.url || '/', `http://${request.headers.host || `${BIND}:${PORT}`}`);
+    const url = new URL(request.url || '/', 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
       // Cross-site request forgery guard: every state-changing call must come from our own page.
       if (request.method !== 'GET' && request.method !== 'HEAD' && request.method !== 'OPTIONS' && !auth.isSameOrigin(request)) {
+        LOG.warn('access', 'bad-origin', `拒绝跨站请求：来源 ${request.headers.origin || request.headers.referer || '（空）'} 与访问地址不一致`, { ...requestFields(request), path: url.pathname }, `origin:${request.headers.origin}:${auth.clientIp(request)}`);
         jsonResponse(response, 403, { ok: false, errorCode: 'AUTH_BAD_ORIGIN', error: '请求来源不被允许' }, request);
         return;
       }
@@ -3240,7 +3441,7 @@ const handleRequest = async (request, response) => {
     }
     serveStatic(request, response, url.pathname);
   } catch (error) {
-    console.error('[bridge]', error);
+    LOG.error('system', 'request-error', `请求出错：${safeError(error)}`, { ...requestFields(request), path: String(request.url || '').slice(0, 200) });
     if (!response.headersSent) {
       const requestedStatus = Number(error?.statusCode);
       const statusCode = Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 599 ? requestedStatus : 400;
@@ -3249,21 +3450,18 @@ const handleRequest = async (request, response) => {
     else response.end();
   }
 };
-const server = tlsOptions ? https.createServer({ cert: tlsOptions.cert, key: tlsOptions.key, minVersion: 'TLSv1.2' }, handleRequest) : http.createServer(handleRequest);
 
-server.on('clientError', (error, socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));
-server.on('upgrade', (request, socket, head) => {
-  if (refuseUntrustedProxy(socket)) {
-    writeUpgradeError(socket, 403, 'Reverse proxy address not allowed');
-    return;
-  }
+const handleUpgrade = (request, socket, head) => {
+  const refused = gate(request);
+  if (refused) { writeUpgradeError(socket, refused.status, 'Refused'); return; }
   try {
-    const url = new URL(request.url || '/', `http://${request.headers.host || `${BIND}:${PORT}`}`);
+    const url = new URL(request.url || '/', 'http://localhost');
     if (url.pathname !== MEDIA_GATEWAY_PATH) {
       socket.destroy();
       return;
     }
     if (!auth.isSameOrigin(request)) {
+      LOG.warn('access', 'bad-origin', `拒绝 WebSocket：来源 ${request.headers.origin || '（空）'} 与访问地址不一致`, requestFields(request), `ws-origin:${request.headers.origin}:${auth.clientIp(request)}`);
       writeUpgradeError(socket, 403, 'Origin not allowed');
       return;
     }
@@ -3273,6 +3471,7 @@ server.on('upgrade', (request, socket, head) => {
     }
     // Watching / controlling a stream this browser did not start may need a two-step code (policy "resume").
     if (activeSession && !auth.allows(request, 'resume', activeSession.id)) {
+      LOG.warn('access', 'stream-2fa-required', '拒绝接入串流：需要先通过两步验证', requestFields(request), `ws-2fa:${auth.clientIp(request)}`);
       writeUpgradeError(socket, 403, 'Two-step verification required');
       return;
     }
@@ -3280,55 +3479,119 @@ server.on('upgrade', (request, socket, head) => {
   } catch (error) {
     writeUpgradeError(socket, 400, safeError(error));
   }
-});
-function describeOwnCertificate(own) {
-  const days = Math.floor((new Date(own.x509.validTo).getTime() - Date.now()) / 86400000);
-  console.log(`TLS certificate: ${TLS_CERT_FILE}（${own.names.join(', ') || own.x509.subject}，剩余 ${days} 天）`);
-  if (days < 0) console.warn('警告：HTTPS 证书已过期，浏览器会拒绝连接。');
-  else if (days < 14) console.warn(`警告：HTTPS 证书将在 ${days} 天后过期。续期后替换文件即可，Bridge 会自动重新加载。`);
-  if (own.incompleteChain) console.warn('警告：证书文件只包含站点证书、没有中间证书，部分设备（尤其手机）会提示不受信任。请改用 fullchain.pem / *_bundle.crt。');
-}
+};
 
-// Pick up renewed certificates (certbot, acme.sh, ...) without restarting the bridge.
-function watchOwnCertificate() {
-  let pending = null;
-  const reload = () => {
-    clearTimeout(pending);
-    // Renewals usually replace the certificate and key one after another; wait for both.
-    pending = setTimeout(() => {
-      try {
-        const own = readOwnCertificate();
-        if (own.x509.fingerprint256 === tlsOptions.own.x509.fingerprint256) return;
-        server.setSecureContext({ cert: own.cert, key: own.key });
-        tlsOptions = { ...tlsOptions, cert: own.cert, key: own.key, own };
-        console.log('HTTPS 证书已更新并重新加载。');
-        describeOwnCertificate(own);
-      } catch (error) {
-        console.warn(`HTTPS 证书文件已变化，但重新加载失败，继续使用旧证书：${safeError(error)}`);
-      }
-    }, 2000);
-  };
-  for (const file of [TLS_CERT_FILE, TLS_KEY_FILE]) fs.watchFile(file, { interval: 60 * 1000, persistent: false }, reload);
-}
+// One listener per entrypoint. An HTTPS entrypoint also answers plain HTTP on the same port with a redirect
+// to https:// (the first byte of a TLS connection is 0x16), so typing http://address:port still works.
+const listeners = new Map(); // entry id -> { entry, key, state, error, server, sockets, isTrustedProxy }
 
-server.listen(PORT, BIND, () => {
-  const scheme = tlsOptions ? 'https' : 'http';
-  const shownHost = LOOPBACK_BIND ? BIND : (BIND === '0.0.0.0' || BIND === '::' ? '<本机地址>' : BIND);
-  const portSuffix = (scheme === 'https' && PORT === 443) || (scheme === 'http' && PORT === 80) ? '' : `:${PORT}`;
-  console.log(`Sunbridge ${VERSION} listening at ${scheme}://${shownHost.includes(':') ? `[${shownHost}]` : shownHost}:${PORT}`);
-  if (tlsOptions?.own) {
-    describeOwnCertificate(tlsOptions.own);
-    for (const name of tlsOptions.own.names.filter((item) => !item.startsWith('*.'))) console.log(`访问地址: https://${name}${portSuffix}/`);
-    watchOwnCertificate();
-  } else if (tlsOptions) {
-    console.log(`TLS certificate: ${tlsOptions.source}`);
+function openListener(entry) {
+  const sockets = new Set();
+  const tag = (socket) => { socket.sunbridgeEntry = entry; };
+  const onRequest = (request, response) => { request.sunbridgeEntry = entry; void handleRequest(request, response); };
+  const onUpgrade = (request, socket, head) => { request.sunbridgeEntry = entry; handleUpgrade(request, socket, head); };
+  const badRequest = (error, socket) => { try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch { socket.destroy(); } };
+  let front;
+  if (entry.https) {
+    const secure = https.createServer({ SNICallback: (name, done) => done(null, secureContextFor(name)), cert: certStore.selfSigned.cert, key: certStore.selfSigned.key, minVersion: 'TLSv1.2' }, onRequest);
+    secure.on('upgrade', onUpgrade);
+    secure.on('clientError', badRequest);
+    secure.on('tlsClientError', (error, socket) => socket.destroy());
+    const redirect = http.createServer((request, response) => {
+      const host = String(request.headers.host || '').replace(/[^\w.:[\]-]/g, '');
+      if (!host) { response.writeHead(400); response.end(); return; }
+      response.writeHead(308, { Location: `https://${host}${String(request.url || '/').startsWith('/') ? request.url : '/'}`, 'Cache-Control': 'no-store' });
+      response.end();
+    });
+    redirect.on('clientError', badRequest);
+    front = net.createServer((socket) => {
+      sockets.add(socket);
+      tag(socket);
+      socket.on('close', () => sockets.delete(socket));
+      socket.on('error', () => {});
+      socket.setTimeout(15000, () => socket.destroy());
+      socket.once('data', (chunk) => {
+        socket.setTimeout(0);
+        socket.pause();
+        socket.unshift(chunk);
+        (chunk[0] === 0x16 ? secure : redirect).emit('connection', socket);
+        process.nextTick(() => socket.resume());
+      });
+    });
+  } else {
+    front = http.createServer(onRequest);
+    front.on('upgrade', onUpgrade);
+    front.on('clientError', badRequest);
+    front.on('connection', (socket) => { sockets.add(socket); tag(socket); socket.on('close', () => sockets.delete(socket)); });
   }
-  if (TRUST_PROXY) console.log(`反向代理模式：只接受来自 ${TRUSTED_PROXIES.join(', ')} 的连接，并信任其 X-Forwarded-* 头。浏览器请访问 nginx 的 https 地址。`);
-  if (auth.setupRequired) console.log('\n  尚未设置登录密码：运行 start.bat（或 ./start.sh）选择“设置或重置登录密码”后才能登录。\n');
-  if (!LOOPBACK_BIND && !tlsOptions && !TRUST_PROXY) console.warn('警告：监听非本机地址但未启用 HTTPS，密码和串流会以明文传输。');
-  console.log(`Client ID: ${identity.uniqueId}`);
-  console.log(`Private identity storage: ${IDENTITY_FILE}`);
-});
+  const state = { entry, key: JSON.stringify(entry), state: 'starting', error: null, server: front, sockets, isTrustedProxy: makeAddressMatcher(entry.proxy.trusted) };
+  return new Promise((resolve) => {
+    front.once('error', (error) => {
+      state.state = 'error';
+      state.error = error.code === 'EADDRINUSE' ? `端口 ${entry.port} 已被其他程序占用` : error.code === 'EACCES' ? `没有权限监听端口 ${entry.port}` : error.code === 'EADDRNOTAVAIL' ? `这台电脑没有地址 ${entry.bind}` : safeError(error);
+      LOG.error('system', 'listen-failed', `入口 ${entryLabel(entry)} 无法启动：${state.error}`);
+      resolve(state);
+    });
+    front.listen(entry.port, entry.bind, () => {
+      state.state = 'listening';
+      LOG.info('system', 'listening', `入口已启动：${entryLabel(entry)}${entry.proxy.enabled ? `，只接受反向代理 ${entry.proxy.trusted.join(', ')}` : ''}`);
+      resolve(state);
+    });
+  });
+}
+
+function closeListener(state) {
+  return new Promise((resolve) => {
+    try { state.server.close(() => resolve()); } catch { resolve(); }
+    for (const socket of state.sockets) socket.destroy();
+    setTimeout(resolve, 1500).unref?.();
+  });
+}
+
+// Bring the running listeners in line with the entrypoint list; unchanged ones are left alone.
+async function reconcileListeners(entrypoints) {
+  const wanted = new Map(entrypoints.map((entry) => [entry.id, entry]));
+  for (const [id, state] of [...listeners]) {
+    const next = wanted.get(id);
+    if (!next || JSON.stringify(next) !== state.key || state.state !== 'listening') {
+      listeners.delete(id);
+      if (state.state === 'listening') { await closeListener(state); LOG.info('system', 'listener-closed', `入口已关闭：${entryLabel(state.entry)}`); }
+    }
+  }
+  const results = [];
+  for (const entry of entrypoints) {
+    if (listeners.has(entry.id)) { results.push({ id: entry.id, ok: true }); continue; }
+    const state = await openListener(entry);
+    listeners.set(entry.id, state);
+    results.push({ id: entry.id, ok: state.state === 'listening', error: state.error });
+  }
+  return results;
+}
+
+// Pick up certificates added to / renewed in data/certs (certbot, acme.sh, uploads) without a restart.
+setInterval(() => { try { refreshCertificates(); } catch (error) { LOG.error('system', 'certificate-refresh', `检查证书失败：${safeError(error)}`); } }, 60 * 1000).unref();
+
+refreshCertificates();
+LOG.info('system', 'started', `Sunbridge ${VERSION} 已启动（Node.js ${process.version}）`);
+const startResults = await reconcileListeners(netConfig.entrypoints);
+if (!startResults.some((item) => item.ok)) {
+  console.error('\n  没有任何入口能启动（见上面的错误）。可以运行 start.bat reset-network（或 ./start.sh reset-network）恢复默认网络设置。\n');
+  process.exit(1);
+}
+console.log('\n访问地址：');
+for (const entry of netConfig.entrypoints) {
+  if (listeners.get(entry.id)?.state !== 'listening') continue;
+  for (const url of entrypointUrls(entry)) console.log(`  ${url}${entry.proxy.enabled ? '（反向代理入口，浏览器请访问代理的地址）' : ''}`);
+}
+if (netConfig.entrypoints.some((entry) => entry.https)) console.log('  使用自签名证书时浏览器会提示不安全，确认继续即可；也可以在“访问设置”里上传域名证书。');
+if (ENV_ENTRYPOINT) console.log('  入口由环境变量指定，网页上的网络设置为只读。');
+const setupCode = auth.setupCode();
+if (setupCode) {
+  console.log(`\n  首次使用：在浏览器打开上面的地址，用设置码创建账户。`);
+  console.log(`  设置码：${setupCode}\n`);
+}
+console.log(`Client ID: ${identity.uniqueId}`);
+console.log(`日志：${LOG.file}`);
 
 let shuttingDown = false;
 function shutdown() {
@@ -3336,12 +3599,9 @@ function shutdown() {
   shuttingDown = true;
   closeMediaGatewayClients(activeSession, 1001, 'bridge shutting down');
   closeSessionEventStreams();
-  server.close(() => process.exit(0));
-  // Fetch keep-alive sockets should not keep a local Bridge alive after an
-  // explicit shutdown. These methods are available in supported Node.js LTS
-  // releases, but optional chaining keeps the Bridge compatible with older 18.x.
-  server.closeIdleConnections?.();
-  setTimeout(() => server.closeAllConnections?.(), 1000).unref?.();
+  LOG.info('system', 'stopped', 'Sunbridge 已停止');
+  void Promise.all([...listeners.values()].map(closeListener)).then(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref?.();
 }
 
 process.on('SIGINT', shutdown);
