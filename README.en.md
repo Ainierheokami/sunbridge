@@ -109,4 +109,4 @@ Latest Chrome / Edge (desktop and Android) are recommended. Other browsers with 
 
 [GNU General Public License v3.0](LICENSE)
 
-Sunbridge is an independent project and is not affiliated with LizardByte or NVIDIA. Sunshine is a LizardByte project; GameStream is a trademark of NVIDIA.
+This project is intended for learning and exchange. It is provided “as is”, without warranty of any kind; use it at your own risk and in accordance with applicable laws.

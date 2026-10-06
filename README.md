@@ -162,4 +162,4 @@ sunbridge/
 
 [GNU General Public License v3.0](LICENSE)
 
-Sunbridge 是独立项目，与 Sunshine（LizardByte）或 NVIDIA 没有官方关联。Sunshine 是 LizardByte 的项目；GameStream 是 NVIDIA 的商标。
+本项目仅供学习交流使用，按“原样”提供，不附带任何担保。使用时请遵守当地法律法规，风险自负。
