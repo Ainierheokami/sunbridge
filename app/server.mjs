@@ -48,7 +48,7 @@ const TLS_MODE = (() => {
   return 'off';
 })();
 const EXTRA_ORIGINS = envList(process.env.SUNBRIDGE_ALLOWED_ORIGINS) || (Array.isArray(CONFIG.allowedOrigins) ? CONFIG.allowedOrigins : []);
-const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/assets/sunbridge-icon.svg', '/favicon.ico']);
+const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/theme.js', '/assets/sunbridge-icon.svg', '/favicon.ico']);
 const VERSION = '0.2.0';
 const DEFAULT_HTTP_PORT = 47989;
 const DEFAULT_HTTPS_PORT = 47984;
@@ -2932,7 +2932,34 @@ function authErrorMessage(code) {
     AUTH_INVALID_CREDENTIALS: '用户名或密码错误',
     AUTH_RATE_LIMITED: '登录失败次数过多，请稍后再试',
     AUTH_SETUP_REQUIRED: '尚未设置登录密码，请在运行 Sunbridge 的电脑上运行 start.bat（或 ./start.sh）设置密码',
+    AUTH_2FA_REQUIRED: '需要输入两步验证码',
+    AUTH_2FA_INVALID: '验证码错误或已经用过',
+    AUTH_2FA_EXPIRED: '验证已超时，请重新开始',
+    AUTH_2FA_NOT_ENABLED: '尚未启用两步验证',
+    AUTH_2FA_ALREADY_ENABLED: '两步验证已经启用',
+    AUTH_INSECURE_TRANSPORT: '当前连接没有加密（不是 HTTPS），不能在这里设置两步验证',
   }[code] || '认证失败';
+}
+
+const AUTH_STATUS_CODES = {
+  AUTH_REQUIRED: 401, AUTH_INVALID_CREDENTIALS: 401, AUTH_2FA_INVALID: 401, AUTH_2FA_EXPIRED: 401,
+  AUTH_RATE_LIMITED: 429, AUTH_SETUP_REQUIRED: 503, AUTH_WEAK_PASSWORD: 400,
+  AUTH_2FA_REQUIRED: 403, AUTH_2FA_NOT_ENABLED: 409, AUTH_2FA_ALREADY_ENABLED: 409, AUTH_INSECURE_TRANSPORT: 403,
+};
+
+function authFailure(response, result, extra = {}) {
+  if (result.retryAfterMs) response.setHeader('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)));
+  jsonResponse(response, AUTH_STATUS_CODES[result.errorCode] || 400, {
+    ok: false, errorCode: result.errorCode, retryAfterMs: result.retryAfterMs || null, error: result.error || authErrorMessage(result.errorCode), ...extra,
+  });
+}
+
+// Two-step verification gate for stream actions (see auth.mjs). Answers 403 AUTH_2FA_REQUIRED with the
+// purpose, so the page can ask for a code and retry.
+function requireTwoFactor(request, response, purpose, streamId = null) {
+  if (auth.allows(request, purpose, streamId)) return true;
+  authFailure(response, { errorCode: 'AUTH_2FA_REQUIRED' }, { purpose });
+  return false;
 }
 
 function applySecurityHeaders(request, response) {
@@ -2941,7 +2968,29 @@ function applySecurityHeaders(request, response) {
   response.setHeader('Referrer-Policy', 'no-referrer');
   response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   response.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-  if (auth.isSecureRequest(request)) response.setHeader('Strict-Transport-Security', 'max-age=31536000');
+  const secure = auth.isSecureRequest(request);
+  if (secure) response.setHeader('Strict-Transport-Security', 'max-age=31536000');
+  // Everything is served from this origin: no inline or third-party script, no framing. 'self' is spelled
+  // out for the media WebSocket too, since older Safari does not let 'self' cover ws(s)://.
+  const host = String(request.headers.host || '').replace(/[^\w.:[\]-]/g, '');
+  response.setHeader('Content-Security-Policy', [
+    "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob:",
+    `connect-src 'self'${host ? ` ${secure ? 'wss' : 'ws'}://${host}` : ''}`, "worker-src 'self' blob:", "object-src 'none'",
+    "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
+  ].join('; '));
+  if (TRUST_PROXY && !secure) warnPlainProxyRequest(request);
+}
+
+// Reverse proxy mode relies on the proxy for HTTPS. A request it forwarded as plain HTTP (or without
+// X-Forwarded-Proto) means passwords and codes crossed the network unencrypted, unless it is local.
+let plainProxyWarned = false;
+function warnPlainProxyRequest(request) {
+  if (plainProxyWarned) return;
+  const ip = auth.clientIp(request);
+  if (ip === '::1' || ip.startsWith('127.')) return;
+  plainProxyWarned = true;
+  const proto = String(request.headers['x-forwarded-proto'] || '').trim() || '（未设置）';
+  console.warn(`[proxy] 警告：反向代理转发来的请求不是 HTTPS（X-Forwarded-Proto: ${proto}，来自 ${ip}）。请确认代理监听 HTTPS 并设置 proxy_set_header X-Forwarded-Proto $scheme；否则登录密码、验证码和串流都是明文，Cookie 也不会带 Secure。`);
 }
 
 async function handleApi(request, response, pathname) {
@@ -2960,14 +3009,29 @@ async function handleApi(request, response, pathname) {
   if (pathname === '/api/auth/login' && request.method === 'POST') {
     const result = await auth.login(request, body.username, body.password);
     if (!result.ok) {
-      const status = result.errorCode === 'AUTH_RATE_LIMITED' ? 429 : result.errorCode === 'AUTH_SETUP_REQUIRED' ? 503 : 401;
-      if (result.retryAfterMs) response.setHeader('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)));
-      jsonResponse(response, status, { ok: false, errorCode: result.errorCode, retryAfterMs: result.retryAfterMs || null, error: authErrorMessage(result.errorCode) });
+      // Password accepted, code still needed: 401 with the one-time challenge for /api/auth/login/2fa.
+      if (result.errorCode === 'AUTH_2FA_REQUIRED') {
+        jsonResponse(response, 401, { ok: false, errorCode: result.errorCode, challenge: result.challenge, error: authErrorMessage(result.errorCode) });
+        return;
+      }
+      authFailure(response, result);
       return;
     }
     console.log(`[auth] login ${result.username} from ${auth.clientIp(request)}`);
     response.setHeader('Set-Cookie', result.cookie);
     jsonResponse(response, 200, { ok: true, username: result.username });
+    return;
+  }
+  if (pathname === '/api/auth/login/2fa' && request.method === 'POST') {
+    const result = await auth.loginWithCode(request, body.challenge, body.code);
+    if (!result.ok) {
+      if (result.errorCode === 'AUTH_2FA_INVALID') console.warn(`[auth] wrong two-step code from ${auth.clientIp(request)}`);
+      authFailure(response, result);
+      return;
+    }
+    console.log(`[auth] login ${result.username} from ${auth.clientIp(request)} (two-step: ${result.method})`);
+    response.setHeader('Set-Cookie', result.cookie);
+    jsonResponse(response, 200, { ok: true, username: result.username, recoveryRemaining: result.recoveryRemaining ?? null });
     return;
   }
   if (pathname === '/api/auth/logout' && request.method === 'POST') {
@@ -2978,8 +3042,7 @@ async function handleApi(request, response, pathname) {
   if (pathname === '/api/auth/password' && request.method === 'POST') {
     const result = await auth.changePassword(request, body.currentPassword, body.newPassword);
     if (!result.ok) {
-      const status = result.errorCode === 'AUTH_RATE_LIMITED' ? 429 : result.errorCode === 'AUTH_WEAK_PASSWORD' ? 400 : 401;
-      jsonResponse(response, status, { ok: false, errorCode: result.errorCode, error: result.error || authErrorMessage(result.errorCode) });
+      authFailure(response, result);
       return;
     }
     jsonResponse(response, 200, { ok: true });
@@ -2987,6 +3050,31 @@ async function handleApi(request, response, pathname) {
   }
   if (!auth.sessionFor(request)) {
     jsonResponse(response, 401, { ok: false, errorCode: 'AUTH_REQUIRED', error: authErrorMessage('AUTH_REQUIRED') });
+    return;
+  }
+  if (pathname === '/api/auth/2fa' && request.method === 'GET') {
+    jsonResponse(response, 200, { ok: true, ...auth.twoFactorStatus(request) });
+    return;
+  }
+  if (pathname.startsWith('/api/auth/2fa/') && request.method === 'POST') {
+    const action = pathname.slice('/api/auth/2fa/'.length);
+    let result;
+    if (action === 'setup') result = await auth.beginTwoFactor(request, body.password);
+    else if (action === 'enable') result = await auth.enableTwoFactor(request, body.code, body.policy);
+    else if (action === 'verify') result = await auth.verify(request, body.code);
+    else if (['policy', 'recovery-codes', 'disable'].includes(action)) result = await auth.updateTwoFactor(request, { action, code: body.code, password: body.password, policy: body.policy });
+    // Would `purpose` (for stream `sessionId`) be allowed now? Lets the page ask for a code up front.
+    else if (action === 'check') {
+      const purpose = ['login', 'stream', 'resume'].includes(body.purpose) ? body.purpose : 'stream';
+      jsonResponse(response, 200, { ok: true, purpose, required: !auth.allows(request, purpose, typeof body.sessionId === 'string' ? body.sessionId : null) });
+      return;
+    } else {
+      jsonResponse(response, 404, { ok: false, errorCode: 'BRIDGE_ERROR', error: 'API 路径不存在' });
+      return;
+    }
+    if (!result.ok) { authFailure(response, result); return; }
+    if (['enable', 'disable', 'policy'].includes(action)) console.log(`[auth] two-step verification ${action} from ${auth.clientIp(request)}`);
+    jsonResponse(response, 200, result);
     return;
   }
   if (pathname === '/api/bridge/session/events' && request.method === 'GET') {
@@ -3063,16 +3151,20 @@ async function handleApi(request, response, pathname) {
     return;
   }
   if (pathname === '/api/bridge/launch' && request.method === 'POST') {
+    if (!requireTwoFactor(request, response, 'stream')) return;
     const session = await launchHost({ ...body, clientAddress: auth.clientIp(request) });
+    auth.grantStream(request, session?.id);
     jsonResponse(response, 200, { ok: true, session });
     return;
   }
   if (pathname === '/api/bridge/session/resize' && request.method === 'POST') {
+    if (activeSession && !requireTwoFactor(request, response, 'resume', activeSession.id)) return;
     jsonResponse(response, 200, { ok: true, ...resizeSession(body) });
     return;
   }
   if (pathname === '/api/bridge/session/reconnect' && request.method === 'POST') {
     if (!activeSession) throw bridgeError('没有正在进行的串流会话', 'HOST_NOT_FOUND', { statusCode: 409 });
+    if (!requireTwoFactor(request, response, 'resume', activeSession.id)) return;
     void reconnectSession(activeSession, 'manual');
     jsonResponse(response, 200, { ok: true });
     return;
@@ -3087,7 +3179,7 @@ async function handleApi(request, response, pathname) {
 
 // Only the web client itself is served. Everything else in this directory (data with the pairing
 // key, password hashes and TLS keys, certs/, scripts, tests, backups, server sources) must never be readable.
-const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/favicon.ico']);
+const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/qr.js', '/security.js', '/theme.js', '/favicon.ico']);
 const isServableStatic = (requestedPath) => STATIC_FILES.has(requestedPath) || /^\/assets\/[\w.-]+\.(png|jpe?g|svg|webp|ico)$/i.test(requestedPath);
 
 function serveStatic(request, response, pathname) {
@@ -3157,7 +3249,7 @@ const handleRequest = async (request, response) => {
     else response.end();
   }
 };
-const server = tlsOptions ? https.createServer({ cert: tlsOptions.cert, key: tlsOptions.key }, handleRequest) : http.createServer(handleRequest);
+const server = tlsOptions ? https.createServer({ cert: tlsOptions.cert, key: tlsOptions.key, minVersion: 'TLSv1.2' }, handleRequest) : http.createServer(handleRequest);
 
 server.on('clientError', (error, socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));
 server.on('upgrade', (request, socket, head) => {
@@ -3177,6 +3269,11 @@ server.on('upgrade', (request, socket, head) => {
     }
     if (!auth.sessionFor(request)) {
       writeUpgradeError(socket, 401, 'Login required');
+      return;
+    }
+    // Watching / controlling a stream this browser did not start may need a two-step code (policy "resume").
+    if (activeSession && !auth.allows(request, 'resume', activeSession.id)) {
+      writeUpgradeError(socket, 403, 'Two-step verification required');
       return;
     }
     acceptMediaGateway(request, socket, head);

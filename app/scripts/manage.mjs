@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { loadAuthState, saveAuthState } from '../auth.mjs';
+import { disableTwoFactor, loadAuthState, normalizePolicy, saveAuthState } from '../auth.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = process.env.SUNBRIDGE_DATA_DIR ? path.resolve(process.env.SUNBRIDGE_DATA_DIR) : path.join(ROOT, '..', 'data');
@@ -205,6 +205,12 @@ async function status() {
   console.log('  访问地址');
   for (const url of accessUrls(config)) console.log(`    ${cyan(url)}`);
   console.log(`  登录账号       ${auth.user ? `${auth.user.username}（${validSessions().length} 个有效登录会话）` : red('未设置 —— 请先设置登录密码')}`);
+  const twoFactor = auth.user?.twoFactor;
+  if (auth.user) {
+    const policy = normalizePolicy(twoFactor?.policy);
+    const scopes = [['login', '登录'], ['stream', '开始串流'], ['resume', '恢复会话']].filter(([key]) => policy[key]).map(([, label]) => label);
+    console.log(`  两步验证       ${twoFactor ? green(`已启用（${scopes.join('、') || '未选择场景'}；剩余 ${(twoFactor.recoveryCodes || []).length} 个恢复码）`) : dim('未启用（登录后在网页“设置”里开启）')}`);
+  }
   console.log(`  已配对主机     ${hosts.filter((host) => host.paired).map((host) => `${host.name} (${host.address})`).join(', ') || dim('无')}`);
   if (config.tls !== 'off') {
     if (cert) {
@@ -319,6 +325,7 @@ function nginxConfig(config) {
 
     ssl_certificate     /path/to/${domain}/fullchain.pem;   # 换成这个域名的证书（要包含中间证书）
     ssl_certificate_key /path/to/${domain}/privkey.pem;     # 换成对应的私钥
+    ssl_protocols       TLSv1.2 TLSv1.3;                    # 不接受过时的 TLS 1.0 / 1.1
 
     location / {
         proxy_pass http://${defaultUpstream(config)}:${config.port};    # 是 http，不是 https
@@ -342,7 +349,15 @@ ${config.proxyFrom === 'docker' ? `#
 # 或 compose 里加 extra_hosts: ["host.docker.internal:host-gateway"]（Docker Desktop 自带，无需添加）。
 # Sunbridge 只接受 ${(config.trustedProxies || []).join(', ')} 的连接；容器网段不同时，按 Sunbridge 日志提示修改 trustedProxies。
 ` : ''}
-${blocks.join('\n')}`;
+${blocks.join('\n')}${publicPort === 443 ? `
+# 可选：把 http:// 访问跳转到 https://（需要 80 端口可用）。登录密码和串流不要走明文 HTTP。
+# server {
+#     listen 80;
+#     listen [::]:80;
+#     server_name ${(domains.length ? domains : ['example.com']).join(' ')};
+#     return 301 https://$host$request_uri;
+# }
+` : ''}`;
 }
 
 function writeNginxConfig(config = loadConfig()) {
@@ -431,6 +446,14 @@ function logoutAll() {
   console.log(green(`已注销所有登录会话（${count} 个）。运行中的 Sunbridge 会立即生效。`));
 }
 
+// The way back in when the authenticator app and the recovery codes are both lost; only possible on this machine.
+async function twoFactorOff() {
+  if (!loadAuthState(DATA_DIR).user?.twoFactor) { console.log(dim('两步验证没有启用。')); return; }
+  if (!await confirm('关闭两步验证？之后只用密码就能登录，可以随时在网页设置里重新开启。', false)) return;
+  disableTwoFactor(DATA_DIR);
+  console.log(green('已关闭两步验证。运行中的 Sunbridge 会立即生效。'));
+}
+
 function regenerateCertificate() {
   if (loadConfig().tls !== 'self-signed') { console.log(yellow('当前没有使用自签名证书，无需重新生成。')); return; }
   try { fs.unlinkSync(TLS_FILE); } catch { /* not generated yet */ }
@@ -476,6 +499,7 @@ const COMMANDS = {
   status: { label: '查看状态', run: status },
   nginx: { label: '生成 nginx 反向代理配置（反向代理模式）', run: () => writeNginxConfig() },
   'logout-all': { label: '注销所有已登录设备', run: logoutAll },
+  '2fa-off': { label: '关闭两步验证（验证器和恢复码都丢失时）', run: twoFactorOff },
   'export-cert': { label: '导出自签名证书（导入到其他设备以消除安全提示）', run: exportCertificate },
   'regen-cert': { label: '重新生成自签名证书', run: regenerateCertificate },
 };

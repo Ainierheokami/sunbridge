@@ -3,40 +3,64 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#081017" />
+  <meta name="theme-color" content="#f5f5f7" />
+  <script src="theme.js"></script>
   <meta name="robots" content="noindex, nofollow" />
   <title>Sunbridge / 登录</title>
   <link rel="icon" type="image/svg+xml" href="assets/sunbridge-icon.svg" />
   <style>
-    :root { color-scheme: dark; --ink: #f2f7f8; --muted: #93a6ad; --bg: #081017; --surface: #0e1b22; --line: rgba(185, 224, 232, 0.16); --line-strong: rgba(185, 224, 232, 0.32); --cyan: #a8edf7; --cyan-strong: #6cd9eb; --danger: #ff9d9d; font-family: "Avenir Next", "Segoe UI Variable", "SF Pro Display", system-ui, sans-serif; }
+    :root { color-scheme: light; --text: #1d1d1f; --text-2: #4f4f55; --text-3: #6e6e73; --bg: #f5f5f7; --surface: #ffffff; --border: rgba(0, 0, 0, 0.14); --accent: #0071e3; --accent-hover: #0068d1; --accent-text: #0066cc; --focus: 0 0 0 3px rgba(0, 113, 227, 0.35); --danger: #c4001a; --warn-bg: rgba(255, 159, 10, 0.14); --warn: #8a4500; --shadow: 0 12px 40px rgba(0, 0, 0, 0.1), 0 0 0 0.5px rgba(0, 0, 0, 0.06); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif; }
+    :root[data-theme="dark"] { color-scheme: dark; --text: #f5f5f7; --text-2: #d0d0d5; --text-3: #a1a1a6; --bg: #1e1e20; --surface: #2c2c2f; --border: rgba(255, 255, 255, 0.16); --accent: #0a84ff; --accent-hover: #2e94ff; --accent-text: #4aa3ff; --focus: 0 0 0 3px rgba(10, 132, 255, 0.5); --danger: #ff6961; --warn-bg: rgba(255, 159, 10, 0.16); --warn: #ffb340; --shadow: 0 16px 48px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.1); }
+    :root[data-text-size="large"] { font-size: 112.5%; }
+    :root[data-text-size="xlarge"] { font-size: 125%; }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: radial-gradient(circle at 70% 15%, rgba(108, 217, 235, 0.10), transparent 40%), var(--bg); color: var(--ink); }
-    .card { width: min(380px, 100%); padding: 32px 28px 28px; border: 1px solid var(--line); border-radius: 22px; background: var(--surface); box-shadow: 0 25px 70px rgba(0, 0, 0, 0.34); }
-    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
-    .brand img { width: 40px; height: 40px; border-radius: 10px; }
-    .brand small { display: block; color: var(--muted); font-size: 11px; letter-spacing: 0.14em; }
-    .brand strong { font-size: 18px; letter-spacing: 0.02em; }
-    label { display: block; margin: 0 0 16px; font-size: 13px; color: var(--muted); }
-    input { display: block; width: 100%; margin-top: 7px; padding: 11px 13px; border: 1px solid var(--line-strong); border-radius: 11px; background: rgba(0, 0, 0, 0.25); color: var(--ink); font: inherit; font-size: 15px; }
-    input:focus { outline: 2px solid var(--cyan-strong); outline-offset: 1px; border-color: transparent; }
-    button { width: 100%; margin-top: 6px; padding: 12px; border: 0; border-radius: 11px; background: var(--cyan); color: #06222a; font: inherit; font-weight: 650; font-size: 15px; cursor: pointer; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1rem; background: var(--bg); color: var(--text); font-size: 0.9375rem; -webkit-font-smoothing: antialiased; }
+    .card { width: min(24rem, 100%); padding: 2rem 1.75rem 1.75rem; border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); }
+    .brand { display: grid; justify-items: center; gap: 0.625rem; margin-bottom: 1.5rem; text-align: center; }
+    .brand img { width: 4rem; height: 4rem; border-radius: 0.875rem; }
+    .brand small { display: block; color: var(--text-3); font-size: 0.875rem; }
+    .brand strong { display: block; font-size: 1.375rem; font-weight: 700; }
+    label { display: block; margin: 0 0 1rem; color: var(--text-2); font-size: 0.875rem; font-weight: 500; }
+    input { display: block; width: 100%; margin-top: 0.375rem; padding: 0.6875rem 0.75rem; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 1rem; }
+    input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+    button { width: 100%; margin-top: 0.375rem; padding: 0.75rem; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; font-size: 1rem; cursor: pointer; }
+    button:hover { background: var(--accent-hover); }
+    button:focus-visible { outline: none; box-shadow: var(--focus); }
     button:disabled { opacity: 0.6; cursor: progress; }
-    .message { min-height: 20px; margin: 14px 0 0; font-size: 13px; color: var(--danger); }
-    .message.is-info { color: var(--muted); }
-    code { color: var(--cyan); }
+    .message { min-height: 1.25rem; margin: 0.875rem 0 0; font-size: 0.875rem; color: var(--danger); }
+    .message.is-info { color: var(--text-2); }
+    code { color: var(--accent-text); }
+    .warning { margin: 0 0 1.125rem; padding: 0.625rem 0.75rem; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-size: 0.875rem; line-height: 1.5; }
+    .hint { margin: -0.25rem 0 1rem; color: var(--text-2); font-size: 0.875rem; line-height: 1.55; }
+    .code-input { letter-spacing: 0.3em; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; text-align: center; font-size: 1.375rem; }
+    .link-button { width: auto; margin: 0.875rem 0 0; padding: 0.25rem 0; background: none; color: var(--accent-text); font-size: 0.875rem; font-weight: 500; }
+    .link-button:hover { background: none; text-decoration: underline; }
+    .links { display: flex; justify-content: space-between; gap: 0.75rem; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <main class="card">
     <div class="brand">
       <img src="assets/sunbridge-icon.svg" alt="" />
-      <div><small>SUNBRIDGE / WEB CLIENT</small><strong>登录</strong></div>
+      <div><strong>Sunbridge</strong><small>登录以继续</small></div>
     </div>
+    <p class="warning" id="insecureWarning" hidden>当前连接没有加密（不是 HTTPS）：密码会以明文经过网络。请改用 HTTPS 地址访问。</p>
     <form id="loginForm" autocomplete="on">
       <label>用户名<input id="username" name="username" autocomplete="username" required maxlength="64" autofocus /></label>
       <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024" /></label>
       <button id="submit" type="submit">登录</button>
       <p class="message" id="message" role="alert" aria-live="polite"></p>
+    </form>
+    <form id="codeForm" autocomplete="off" hidden>
+      <p class="hint" id="codeHint">已启用两步验证。打开手机上的验证器应用（Google Authenticator、Microsoft Authenticator 等），输入 Sunbridge 的 6 位验证码。</p>
+      <label><span id="codeLabel">验证码</span><input id="code" name="code" class="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required /></label>
+      <button id="codeSubmit" type="submit">验证</button>
+      <p class="message" id="codeMessage" role="alert" aria-live="polite"></p>
+      <div class="links">
+        <button class="link-button" id="useRecovery" type="button">手机不在身边？使用恢复码</button>
+        <button class="link-button" id="backToPassword" type="button">返回</button>
+      </div>
     </form>
   </main>
   <script src="login.js"></script>

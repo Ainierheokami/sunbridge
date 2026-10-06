@@ -106,6 +106,7 @@
       if (icon) node.innerHTML = icon;
     });
   };
+  window.SunbridgeIcons = { hydrate: hydrateIcons };
 
   const setText = (target, value, scope = document) => {
     const node = resolveNode(target, scope);
@@ -438,12 +439,12 @@
     setText('#signalTooltipTime', result ? t('common.now') : t('diagnostic.waiting'));
   };
 
+  // A plain app icon: the first letter on a colour picked from the name (stable across renders).
   const gameArt = (index, name) => {
-    const label = esc(String(name || t('common.desktop')).toUpperCase());
-    if (index % 4 === 0) return '<div class="art-label">' + label + '</div><div class="art-sun"></div><div class="art-building art-building-a"></div><div class="art-building art-building-b"></div><div class="art-road"></div><div class="art-caption">SUNSHINE</div>';
-    if (index % 4 === 1) return '<div class="art-ring ring-a"></div><div class="art-ring ring-b"></div><div class="art-flame"></div><div class="art-spear"></div><div class="art-label small">' + label + '</div>';
-    if (index % 4 === 2) return '<div class="art-moon-ring"></div><div class="art-tower"></div><div class="art-mist mist-a"></div><div class="art-mist mist-b"></div><div class="art-label small">' + label + '</div>';
-    return '<div class="art-window"><span></span><span></span><span></span><div class="art-window-body"></div></div><div class="art-grid-floor"></div><div class="art-label small">' + label + '</div>';
+    const text = String(name || t('common.desktop')).trim();
+    let hash = 0;
+    for (const char of text) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+    return '<span class="app-tile" data-tone="' + (hash % 6) + '" aria-hidden="true">' + esc((Array.from(text)[0] || '?').toUpperCase()) + '</span>';
   };
 
   const renderLibrary = () => {
@@ -492,7 +493,7 @@
       const status = hostStatus(host);
       const online = hostIsOnline(host);
       const tags = [host.gpu || t('common.unknownGpu'), host.mac ? t('host.wol') : t('host.lan'), host.lastSeen ? t('host.lastSeen', { time: hostLastSeen(host) }) : t('common.none')];
-      return '<article class="host-row ' + (index === 0 ? 'is-primary' : '') + '"><div class="host-row-orb ' + (index ? 'orb-secondary' : '') + '"><span class="orb-core"></span><span class="orb-ring"></span></div><div class="host-row-main"><div class="host-row-title"><h2>' + esc(host.name || host.address) + '</h2><span class="host-chip ' + status.className + '"><span class="status-dot ' + (status.dot === 'online' ? 'is-green' : '') + '"></span> ' + esc(t(status.key)) + '</span>' + (host.paired ? '<span class="host-chip paired"><span data-icon="lock" aria-hidden="true"></span> ' + esc(t('host.paired')) + '</span>' : '') + '</div><p>' + esc(host.address + ' · ' + (host.os || t('common.sunshineHost')) + ' · ' + (host.sunshine || t('common.unknown'))) + '</p><div class="host-row-tags">' + tags.map((tag) => '<span>' + esc(tag) + '</span>').join('') + '</div></div><div class="host-row-actions">' + hostAction(host, status) + '<button class="icon-button" type="button" data-action="open-host-details" data-host="' + esc(host.id) + '" aria-label="' + esc(t('toast.hostDetails')) + '"><span data-icon="more" aria-hidden="true"></span></button></div></article>';
+      return '<article class="host-row ' + (index === 0 ? 'is-primary' : '') + '"><div class="host-row-orb ' + (index ? 'orb-secondary' : '') + '"><span data-icon="host" aria-hidden="true"></span></div><div class="host-row-main"><div class="host-row-title"><h2>' + esc(host.name || host.address) + '</h2><span class="host-chip ' + status.className + '"><span class="status-dot ' + (status.dot === 'online' ? 'is-green' : '') + '"></span> ' + esc(t(status.key)) + '</span>' + (host.paired ? '<span class="host-chip paired"><span data-icon="lock" aria-hidden="true"></span> ' + esc(t('host.paired')) + '</span>' : '') + '</div><p>' + esc(host.address + ' · ' + (host.os || t('common.sunshineHost')) + ' · ' + (host.sunshine || t('common.unknown'))) + '</p><div class="host-row-tags">' + tags.map((tag) => '<span>' + esc(tag) + '</span>').join('') + '</div></div><div class="host-row-actions">' + hostAction(host, status) + '<button class="icon-button" type="button" data-action="open-host-details" data-host="' + esc(host.id) + '" aria-label="' + esc(t('toast.hostDetails')) + '"><span data-icon="more" aria-hidden="true"></span></button></div></article>';
     }).join('');
     hydrateIcons(list);
   };
@@ -1624,6 +1625,8 @@
       }
       if (session) { endStreamLocally('reconnect.replaced'); return; }
       // The bridge has no session any more (it restarted): launch again; it resumes the app still running on the host.
+      if (!(await confirmTwoFactor('stream'))) { endStreamLocally('reconnect.verifyCancelled'); return; }
+      if (state.stopping || !state.streamSession) return;
       const host = state.streamHost; const app = state.streamApp;
       const base = state.streamPlan || streamPlan(host, app);
       const plan = base.adaptive ? { ...base, ...adaptiveSize() } : base;
@@ -1728,6 +1731,14 @@
     setText('#sessionResumeLabel', t('resume.return'));
     setText('#sessionEndLabel', t('resume.end'));
   };
+  // Two-step verification (security.js): resolves false when the user cancels the code prompt.
+  const confirmTwoFactor = (purpose, streamId) => (window.SunbridgeSecurity ? window.SunbridgeSecurity.ensure(purpose, streamId) : Promise.resolve(true));
+  const resumeStream = async (session) => {
+    // Unlock audio inside the click before the (possibly prompting) check yields.
+    void prepareAudioPlayback();
+    if (!(await confirmTwoFactor('resume', session.id))) { closeAudioContext(); return; }
+    attachStream(session);
+  };
   const attachStream = (session) => {
     const host = hostByRef(session.hostId) || { id: session.hostId, name: session.hostName, address: '', apps: [] };
     const app = { id: session.appId, name: session.appName };
@@ -1749,12 +1760,13 @@
     const app = host?.apps?.find((item) => String(item.id) === String(appId) || item.name === appName) || { id: appId, name: appName || t('common.desktop') };
     if (!host) { showToast(t('session.couldNotStart'), t('diagnostic.noHost'), 'warning'); return; }
     if (!hostIsOnline(host)) { showToast(t('session.couldNotStart'), t('host.offlineHint'), 'warning'); return; }
-    state.selectedHost = host; state.streamHost = host; state.streamApp = app; state.streamSession = null;
     const overlay = qs('#streamOverlay'); if (!overlay) return;
     // Start/resume the Web Audio context from the user gesture before the async
     // Sunshine launch request yields control, so browsers are less likely to
     // classify the first decoded Opus frame as unsolicited autoplay.
     void prepareAudioPlayback();
+    if (!(await confirmTwoFactor('stream'))) { closeAudioContext(); return; }
+    state.selectedHost = host; state.streamHost = host; state.streamApp = app; state.streamSession = null;
     overlay.hidden = false; document.body.style.overflow = 'hidden'; document.body.classList.add('is-streaming'); renderStream('negotiating'); startSessionEvents(); startSessionPolling();
     // Plan after the overlay is visible: adaptive resolution measures the stream area.
     const plan = streamPlan(host, app);
@@ -1769,7 +1781,7 @@
       startMediaGateway(session);
       startResizeWatcher();
       renderStream('started');
-      showToast(t('session.controlStarted'), t('session.mediaPending'), bridge.isDemo ? 'info' : 'success');
+      showToast(t('session.controlStarted', { app: app.name }), t('session.mediaPending'), bridge.isDemo ? 'info' : 'success');
     } catch (error) {
       stopSessionPolling();
       stopSessionEvents();
@@ -2012,7 +2024,7 @@
     if (action === 'toggle-control-mode') toggleControlMode();
     if (action === 'toggle-fullscreen') void toggleFullscreen();
     if (action === 'show-keyboard') showSoftKeyboard();
-    if (action === 'resume-session' && state.activeRemoteSession) attachStream(state.activeRemoteSession);
+    if (action === 'resume-session' && state.activeRemoteSession) void resumeStream(state.activeRemoteSession);
     if (action === 'end-active-session') void (async () => { try { await bridge.stop(); } catch (error) { showToast(t('session.stopFailed'), errorMessage(error), 'warning'); } state.activeRemoteSession = null; renderResumeBar(); })();
     if (action === 'host-unpair') void handleHostUnpair(actionTarget);
     if (action === 'host-delete') void handleHostDelete(actionTarget);

@@ -46,7 +46,7 @@ Sunbridge runs on your own computer (usually the one running Sunshine) and turns
 - **Game mode**: pointer lock with relative motion, gamepads with rumble.
 - **Glitch-free audio**: Opus stereo played through a jitter buffer with clock-drift correction.
 - **One script to manage it**: `start.bat` / `start.sh` sets the password, configures access (reverse proxy with multiple domains and a generated nginx config, your own certificate, self-signed, or local only), starts it and shows status.
-- **Secure by default**: every page and API needs a login, failed logins are rate-limited, cross-site requests are blocked, and pairing keys and account data are never served over the web.
+- **Secure by default**: every page and API needs a login, optional two-step verification (authenticator app codes, separately for login, starting a stream and resuming a session), failed logins are rate-limited, cross-site requests are blocked, and pairing keys and account data are never served over the web.
 
 <p align="center">
   <img src="docs/overview.png" alt="Overview" width="49%" />
@@ -84,6 +84,14 @@ From the menu:
 > Browsers only enable video decoding, gamepads and pointer lock on HTTPS or localhost, so use HTTPS when connecting from other devices.
 
 Shortcuts: Ctrl+Alt+Shift+Z releases the mouse, Ctrl+Alt+Shift+Q ends the stream, Ctrl+Alt+Shift+S toggles the stream statistics.
+
+**Settings → Appearance and text** switches between light, dark and system themes and enlarges the text (Large / Extra large); it applies to the current browser only.
+
+### Two-step verification
+
+Turn it on in **Settings → Two-step verification**: confirm the password, scan the QR code with an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, …) and enter the 6-digit code. You get 10 one-time recovery codes; keep them safe. Other signed-in devices are signed out.
+
+Choose where a code is asked for: **at login** (on by default), **starting a stream**, and **resuming a session** (joining a stream this browser did not start; your own reconnects and page reloads are not affected). After a code you are not asked again for 5 minutes. Lost both the phone and the recovery codes? Run `./start.sh 2fa-off` (`start.bat 2fa-off`) on the bridge machine. Setup only works over HTTPS or on the bridge machine itself, so the secret never crosses the network in clear text.
 
 ## Layout
 
