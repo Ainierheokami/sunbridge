@@ -1,13 +1,15 @@
 // Audio playout for the stream, on the audio rendering thread.
 //
-// Decoded Opus (5 ms packets) arrives in bursts: over the internet audio shares one TCP connection with video,
-// so a keyframe can hold it back for tens of milliseconds. Scheduling every packet as its own buffer turned
+// Decoded Opus (5 ms packets) arrives in bursts: over the internet a TCP retransmission or a keyframe can hold
+// it back for tens to hundreds of milliseconds. Scheduling every packet as its own buffer turned
 // each late packet into a gap and a click. Here a jitter buffer absorbs the bursts:
-//   - playback starts once `target` ms are buffered; an underrun raises the target (up to 250 ms), 15 s
-//     without one lowers it again (down to 40 ms);
+//   - playback starts once `target` ms are buffered; an underrun raises the target (+20 ms, up to 300 ms),
+//     15 s without one lowers it again (down to 40 ms);
 //   - running dry fades out instead of cutting off, and playback fades back in;
 //   - the read speed is nudged (+-0.5..1.5 %, linear interpolation) to hold the buffer near the target, which
 //     also absorbs the host/browser clock drift and a context sample rate other than the stream's.
+// Audio comes from the page over this.port, or from the media worker (which decodes it off the main thread)
+// over a MessagePort handed in with { type: 'port' }.
 class StreamAudioPlayer extends AudioWorkletProcessor {
   constructor(options) {
     super();
@@ -31,6 +33,10 @@ class StreamAudioPlayer extends AudioWorkletProcessor {
   }
 
   push(data) {
+    if (data?.type === 'port' && data.port) {
+      data.port.onmessage = (event) => this.push(event.data);
+      return;
+    }
     if (data?.type === 'reset') {
       this.level = 0;
       this.playing = false;
@@ -104,7 +110,7 @@ class StreamAudioPlayer extends AudioWorkletProcessor {
       this.level = Math.max(0, this.level);
       this.underruns += 1;
       this.lastUnderrunFrame = this.frame;
-      this.targetMs = Math.min(250, this.targetMs + 15);
+      this.targetMs = Math.min(300, this.targetMs + 20);
     } else if (this.frame - this.lastUnderrunFrame > sampleRate * 15 && this.targetMs > 40) {
       this.lastUnderrunFrame = this.frame;
       this.targetMs = Math.max(40, this.targetMs - 5);

@@ -11,5 +11,8 @@
   "scripts": {
     "start": "node server.mjs",
     "passwd": "node scripts/passwd.mjs"
+  },
+  "optionalDependencies": {
+    "node-datachannel": "^0.33.4"
   }
 }

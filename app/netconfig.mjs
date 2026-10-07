@@ -192,8 +192,25 @@ export function validateConfig(input, { lenient = false } = {}) {
     allowedOrigins: strings(source.allowedOrigins),
     certificateNames: strings(source.certificateNames),
     extraCertificates: (Array.isArray(source.extraCertificates) ? source.extraCertificates : []).filter((item) => item?.cert && item?.key).map((item) => ({ cert: String(item.cert), key: String(item.key) })).slice(0, 16),
+    webrtc: validateWebrtc(source.webrtc, fail),
   };
   return { config, errors: lenient ? [] : errors };
+}
+
+// WebRTC (media over UDP): one UDP port shared by every browser. port null = the first entrypoint's port
+// number (TCP and UDP ports are separate, so the same number works); publicAddress null = the address the
+// browser used for the page, else "host" or "host:port" as the browser should reach the UDP port.
+export function validateWebrtc(input, fail = () => {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  const port = source.port == null || source.port === '' ? null : Number(source.port);
+  let checkedPort = null;
+  if (port != null) {
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) checkedPort = port;
+    else fail('WebRTC UDP 端口必须是 1 到 65535');
+  }
+  let publicAddress = String(source.publicAddress || '').trim() || null;
+  if (publicAddress && !/^[\w.:\[\]-]+$/.test(publicAddress) || (publicAddress && !parseHost(publicAddress).name)) { fail(`WebRTC 公网地址无效：${publicAddress}`); publicAddress = null; }
+  return { enabled: source.enabled !== false, port: checkedPort, publicAddress };
 }
 
 // ----- certificates -----

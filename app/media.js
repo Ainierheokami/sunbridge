@@ -92,7 +92,8 @@
     while (offset + 16 <= bytes.length) {
       const length = 16 + readU32BE(bytes, offset + 12);
       if (offset + length > bytes.length) throw new RangeError('媒体网关 envelope RTP 长度无效');
-      callback(parseEnvelope(bytes.subarray(offset, offset + length)));
+      const view = bytes.subarray(offset, offset + length);
+      callback(parseEnvelope(view), view);
       offset += length;
     }
   }
@@ -576,11 +577,13 @@
     let workletFailed = false;
     const workletQueue = [];
 
+    // options.outputPort (in the media worker): decoded audio goes over this MessagePort straight to the
+    // AudioWorklet, with no AudioContext here; the page owns the context, autoplay and the worklet's stats.
+    const outputPort = options.outputPort || null;
     const AudioContextCtor = typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext);
-    const decoderSupported = typeof window !== 'undefined'
-      && typeof window.AudioDecoder === 'function'
-      && typeof window.EncodedAudioChunk === 'function'
-      && (Boolean(audioContext) || typeof AudioContextCtor === 'function');
+    const decoderSupported = typeof globalThis.AudioDecoder === 'function'
+      && typeof globalThis.EncodedAudioChunk === 'function'
+      && (Boolean(outputPort) || Boolean(audioContext) || typeof AudioContextCtor === 'function');
 
     // Notify only on a real change: decoded frames would otherwise report "playing" dozens of times a second.
     const setState = (next, extra = {}, force = false) => {
@@ -598,6 +601,7 @@
     };
 
     const createOutput = () => {
+      if (outputPort) return true;
       if (!audioContext) {
         if (!decoderSupported || typeof AudioContextCtor !== 'function') return false;
         try {
@@ -783,15 +787,65 @@
       callbacks.onFrame?.({ decoded: true, frames, sampleRate, numberOfChannels: state.numberOfChannels });
     };
 
+    // Loss concealment. Packets lost on the way (skipped by the reorder buffer) leave a gap in the timestamps
+    // of the decoded audio; it is filled with the last packet fading out over 20 ms, then silence. The playout
+    // buffer so keeps its length (each lost packet would otherwise shorten it until it ran dry and rebuffered,
+    // a much longer silence) and a lost packet is a soft dip instead of a click.
+    const CONCEAL_FADE_SECONDS = 0.02;
+    const CONCEAL_MAX_US = 250000; // longer gaps are a stream restart, not loss
+    let lastEndUs = null;
+    let lastPlanes = null;
+    state.concealedMs = 0;
+    state.concealedGaps = 0;
+    const concealment = (timestampUs, sampleRate) => {
+      if (lastEndUs == null || !lastPlanes || !Number.isFinite(timestampUs)) return null;
+      const gapUs = timestampUs - lastEndUs;
+      if (gapUs < 2500 || gapUs > CONCEAL_MAX_US) return null;
+      const frames = Math.round((gapUs * sampleRate) / 1e6);
+      const fadeFrames = Math.max(1, Math.min(frames, Math.round(sampleRate * CONCEAL_FADE_SECONDS)));
+      state.concealedMs += gapUs / 1000;
+      state.concealedGaps += 1;
+      return lastPlanes.map((source) => {
+        const plane = new Float32Array(frames);
+        for (let i = 0; i < fadeFrames; i += 1) plane[i] = source[i % source.length] * (1 - i / fadeFrames);
+        return plane;
+      });
+    };
+    const notePlayed = (timestampUs, planes, frames, sampleRate) => {
+      lastEndUs = Number.isFinite(timestampUs) ? timestampUs + (frames * 1e6) / sampleRate : null;
+      lastPlanes = planes.map((plane) => plane.slice());
+    };
+
     const scheduleAudioData = (audioData) => {
       if (closed) { audioData.close?.(); return; }
       try {
         if (!createOutput()) { audioData.close?.(); return; }
-        if (workletNode || workletPending) {
+        if (outputPort) {
+          const timestampUs = Number(audioData.timestamp);
           const { planes, frames, sampleRate } = copyAudioDataToPlanes(audioData);
           audioData.close?.();
-          if (workletNode) postPlanes(planes);
-          else if (workletQueue.length < 200) workletQueue.push(planes);
+          const filler = concealment(timestampUs, sampleRate);
+          if (filler) outputPort.postMessage({ channels: filler }, filler.map((plane) => plane.buffer));
+          notePlayed(timestampUs, planes, frames, sampleRate);
+          outputPort.postMessage({ channels: planes }, planes.map((plane) => plane.buffer));
+          state.decodedFrames += frames;
+          state.scheduledFrames += frames;
+          state.sampleRate = sampleRate;
+          state.numberOfChannels = planes.length;
+          setState('playing');
+          callbacks.onFrame?.({ decoded: true, frames, sampleRate, numberOfChannels: state.numberOfChannels });
+          return;
+        }
+        if (workletNode || workletPending) {
+          const timestampUs = Number(audioData.timestamp);
+          const { planes, frames, sampleRate } = copyAudioDataToPlanes(audioData);
+          audioData.close?.();
+          const filler = concealment(timestampUs, sampleRate);
+          notePlayed(timestampUs, planes, frames, sampleRate);
+          for (const chunk of filler ? [filler, planes] : [planes]) {
+            if (workletNode) postPlanes(chunk);
+            else if (workletQueue.length < 200) workletQueue.push(chunk);
+          }
           markPlayed(frames, sampleRate, planes.length);
           return;
         }
@@ -835,7 +889,7 @@
       state.opusPackets += 1;
       if (!decoder || closed || state.state === 'unsupported') return;
       try {
-        const chunk = new window.EncodedAudioChunk({
+        const chunk = new globalThis.EncodedAudioChunk({
           type: 'key',
           timestamp: timestampInMicroseconds(packet.timestamp),
           duration: Math.max(1, Math.round(state.packetDurationMs * 1000)),
@@ -880,9 +934,9 @@
       setState('unsupported');
     } else {
       try {
-        decoder = new window.AudioDecoder({ output: scheduleAudioData, error: (error) => fail(error) });
+        decoder = new globalThis.AudioDecoder({ output: scheduleAudioData, error: (error) => fail(error) });
         decoder.configure({ codec: options.codec || 'opus', sampleRate: state.sampleRate, numberOfChannels: state.numberOfChannels });
-        state.contextState = audioContext.state || 'unknown';
+        state.contextState = audioContext?.state || (outputPort ? 'worker' : 'unknown');
       } catch (error) {
         decoder = null;
         state.lastError = text(error?.message || error);
@@ -1155,15 +1209,28 @@
       backlogResets: 0,
       renderedFrames: 0,
       skippedFrames: 0,
+      // Hardware first (see chooseConfig); 'no-preference' once the hardware has refused this stream.
+      hardwareAcceleration: options.hardwareAcceleration === 'no-preference' ? 'no-preference' : 'prefer-hardware',
+      // Size of the last frame drawn (an OffscreenCanvas placeholder doesn't show it on the element).
+      width: null,
+      height: null,
+      // true once a hardware-only decoder has produced a frame, false after falling back to software.
+      hardware: null,
+      hardwareFallbacks: 0,
     };
     // A decoder that cannot keep up would otherwise queue frames forever and the picture drifts seconds behind.
-    // Past ~0.5 s of queued frames: drop the backlog, wait for the next keyframe (the app requests an IDR,
-    // which Sunshine answers within a frame or two). Not while the decoder is still warming up after (re)configuration.
-    const MAX_DECODE_QUEUE = Number(options.maxDecodeQueue) || Math.max(15, Math.round(state.frameRate / 2));
+    // The backlog is judged as time (frames queued x frame interval): past 250 ms it is dropped and decoding
+    // restarts at the next keyframe (the app requests an IDR, which Sunshine answers within a frame or two), but
+    // not again within 3 s unless it passes a second: a reset rebuilds the hardware decoder, which costs more
+    // than a few frames, and back-to-back resets only loop. Not while the decoder warms up after (re)configuration.
+    const BACKLOG_RESET_MS = 250;
+    const BACKLOG_HARD_MS = 1000;
+    const BACKLOG_COOLDOWN_MS = 3000;
+    const frameIntervalMs = 1000 / state.frameRate;
+    let lastBacklogResetAt = -Infinity;
     let warmedUp = false;
-    const decoderSupported = typeof window !== 'undefined'
-      && typeof window.VideoDecoder === 'function'
-      && typeof window.EncodedVideoChunk === 'function'
+    const decoderSupported = typeof globalThis.VideoDecoder === 'function'
+      && typeof globalThis.EncodedVideoChunk === 'function'
       && target
       && typeof target.getContext === 'function';
     let decoder = null;
@@ -1229,6 +1296,8 @@
       const height = frame.displayHeight || frame.codedHeight || target.height || 1;
       if (target.width !== width) target.width = width;
       if (target.height !== height) target.height = height;
+      state.width = width;
+      state.height = height;
       try { context.drawImage(frame, 0, 0, width, height); } catch (error) { fail(error); }
     };
     const updateDecoderFormat = (info) => {
@@ -1254,24 +1323,72 @@
     // reconfigures the decoder in place.
     let configuredDescription = null;
     const sameBytes = (a, b) => a && b && a.length === b.length && a.every((value, index) => value === b[index]);
-    const configureDecoder = (info) => {
-      if (!decoder) return;
-      if (decoder.state === 'configured') {
-        if (!info?.keyframe || !info.paramKey || sameBytes(info.paramKey, configuredDescription)) return;
-      } else if (decoder.state !== 'unconfigured') {
-        return;
+    // Config chosen with isConfigSupported before configure(): configure() accepts a "prefer-hardware" the browser
+    // can't honour and only fails later, asynchronously. Asked with the codec string from the bitstream and the
+    // stream's size (a GPU that decodes 1080p AV1 may not do 4K): hardware first, software only when the
+    // hardware refuses. Cached per codec string, size and preference.
+    const configCache = new Map();
+    const chooseConfig = async (base) => {
+      const key = [base.codec, base.codedWidth, base.codedHeight, state.hardwareAcceleration].join('|');
+      if (configCache.has(key)) return configCache.get(key);
+      const preferences = state.hardwareAcceleration === 'prefer-hardware' ? ['prefer-hardware', 'no-preference'] : ['no-preference'];
+      let chosen = null;
+      if (typeof globalThis.VideoDecoder.isConfigSupported !== 'function') {
+        chosen = { ...base, hardwareAcceleration: 'no-preference' };
+      } else {
+        for (const hardwareAcceleration of preferences) {
+          try {
+            if ((await globalThis.VideoDecoder.isConfigSupported({ ...base, hardwareAcceleration }))?.supported) { chosen = { ...base, hardwareAcceleration }; break; }
+          } catch { /* next preference */ }
+        }
       }
+      configCache.set(key, chosen);
+      return chosen;
+    };
+    // While the config is being chosen, frames wait here from the newest keyframe on (a delta frame dropped now
+    // would break the reference chain of every frame after it); decoded in order once configured.
+    const MAX_HELD_FRAMES = 120;
+    let configuring = false;
+    let heldFrames = [];
+    const needsConfigure = (info) => decoder.state === 'unconfigured'
+      || (decoder.state === 'configured' && info?.keyframe && info.paramKey && !sameBytes(info.paramKey, configuredDescription));
+    const startConfigure = (info) => {
       updateDecoderFormat(info);
       configuredDescription = info?.paramKey || decoderDescription;
-      try {
-        // "no-preference" still uses the GPU decoder when there is one; "prefer-hardware" makes configure
-        // fail outright on machines without hardware H.264 decoding (VMs, some Linux setups, remote desktops).
-        const config = { codec: state.codec, optimizeForLatency: true, hardwareAcceleration: 'no-preference' };
-        if (decoderDescription) config.description = decoderDescription;
-        decoder.configure(config);
-      } catch (error) {
-        fail(error);
-      }
+      const base = { codec: state.codec, optimizeForLatency: true };
+      const width = Number(info?.width) || Number(options.width) || 0;
+      const height = Number(info?.height) || Number(options.height) || 0;
+      if (width && height) Object.assign(base, { codedWidth: width, codedHeight: height });
+      if (decoderDescription) base.description = decoderDescription;
+      configuring = true;
+      const target = decoder;
+      void chooseConfig(base).then((config) => {
+        configuring = false;
+        // Closed, or replaced after an error (it starts over from the next keyframe).
+        if (closed || decoder !== target) { heldFrames = []; return; }
+        if (!config) {
+          heldFrames = [];
+          fail(new Error(`This browser cannot decode ${state.codec}`), 'unsupported');
+          return;
+        }
+        if (config.hardwareAcceleration !== 'prefer-hardware' && state.hardwareAcceleration === 'prefer-hardware') {
+          state.hardwareAcceleration = 'no-preference';
+          state.hardware = false;
+          state.hardwareFallbacks += 1;
+          callbacks.onHardwareFallback?.({ codec: state.codec, codecFamily: state.codecFamily, error: null });
+        }
+        outputSinceConfigure = false;
+        try {
+          decoder.configure(config);
+        } catch (error) {
+          heldFrames = [];
+          fail(error);
+          return;
+        }
+        const held = heldFrames;
+        heldFrames = [];
+        for (const item of held) submit(item.frame, item.info);
+      });
     };
     const timestampInMicroseconds = (rtpTimestamp) => {
       const raw = Number(rtpTimestamp);
@@ -1285,6 +1402,7 @@
       return Math.max(0, Math.round(((timestampEpoch + current) * 1000000) / state.clockRate));
     };
     let needKeyframe = true;
+    let outputSinceConfigure = false;
     // decode() submit time by chunk timestamp, to measure decoder latency in output().
     const submittedAt = new Map();
     const noteFrameTiming = (timing) => {
@@ -1303,8 +1421,10 @@
         return;
       }
       if (!decoder || closed) return;
-      if (warmedUp && decoder.state === 'configured' && decoder.decodeQueueSize > MAX_DECODE_QUEUE) {
+      const backlogMs = decoder.state === 'configured' ? decoder.decodeQueueSize * frameIntervalMs : 0;
+      if (warmedUp && (backlogMs > BACKLOG_HARD_MS || (backlogMs > BACKLOG_RESET_MS && now() - lastBacklogResetAt > BACKLOG_COOLDOWN_MS))) {
         warmedUp = false;
+        lastBacklogResetAt = now();
         try { decoder.reset(); } catch { /* reconfigured below on the next keyframe */ }
         submittedAt.clear();
         state.backlogResets += 1;
@@ -1316,12 +1436,26 @@
           return;
         }
       }
-      configureDecoder(info);
-      if (!decoder || decoder.state !== 'configured') return;
+      if (configuring) {
+        if (info.keyframe) heldFrames = [{ frame, info }];
+        else if (heldFrames.length && heldFrames.length < MAX_HELD_FRAMES) heldFrames.push({ frame, info });
+        else state.droppedFrames += 1;
+        return;
+      }
+      if (needsConfigure(info)) {
+        if (!info.keyframe) { state.droppedFrames += 1; return; }
+        heldFrames = [{ frame, info }];
+        startConfigure(info);
+        return;
+      }
+      if (decoder.state !== 'configured') return;
+      submit(frame, info);
+    };
+    const submit = (frame, info) => {
       try {
         const timestamp = timestampInMicroseconds(info.timestamp);
         const data = decoderDescription ? toAvcSample(frame, info.nals) : frame;
-        const chunk = new window.EncodedVideoChunk({ type: info.keyframe ? 'key' : 'delta', timestamp, duration: frameDuration, data });
+        const chunk = new globalThis.EncodedVideoChunk({ type: info.keyframe ? 'key' : 'delta', timestamp, duration: frameDuration, data });
         submittedAt.set(timestamp, now());
         decoder.decode(chunk);
         state.decodeQueue = decoder.decodeQueueSize;
@@ -1362,7 +1496,7 @@
     }
 
     function createDecoder() {
-      return new window.VideoDecoder({
+      return new globalThis.VideoDecoder({
           output(frame) {
             if (closed) { frame.close(); return; }
             const submitted = submittedAt.get(frame.timestamp);
@@ -1372,6 +1506,8 @@
               state.decodeCount += 1;
             }
             warmedUp = true;
+            outputSinceConfigure = true;
+            if (state.hardwareAcceleration === 'prefer-hardware' && state.hardware !== true) state.hardware = true;
             state.decodedFrames += 1;
             state.lastFrameAt = Date.now();
             state.decodeQueue = decoder?.decodeQueueSize ?? 0;
@@ -1380,7 +1516,17 @@
             callbacks.onFrame?.({ keyframe: false, decoded: true, waitingKeyframe: false, info: null });
           },
           error(error) {
+            // A hardware-only decoder that fails before its first frame (NotSupportedError, or the GPU decoder
+            // rejecting this stream's profile / level / size) won't do better on retry: continue in software.
+            const hardwareFailed = state.hardwareAcceleration === 'prefer-hardware' && (error?.name === 'NotSupportedError' || !outputSinceConfigure);
+            if (hardwareFailed) {
+              state.hardwareAcceleration = 'no-preference';
+              state.hardware = false;
+              state.hardwareFallbacks += 1;
+              configuredDescription = null;
+            }
             fail(error);
+            if (hardwareFailed) callbacks.onHardwareFallback?.({ codec: state.codec, codecFamily: state.codecFamily, error });
             // WebCodecs closes the decoder after an error; start over from the next keyframe.
             if (closed) return;
             try {
@@ -1474,7 +1620,218 @@
     };
   }
 
-  const api = { MAGIC, VERSION, STREAM_IDS, VIDEO_FLAGS, AUDIO_PAYLOAD_TYPES, FRAME_HEADER_BYTES, recoverShards, createFrameAssembler, parseRtp, parseEnvelope, forEachEnvelope, hevcInfo, hevcCodecString, av1Info, av1CodecString, parseVideoPacket, parseAudioPacket, createVideoPipeline, createAudioPipeline, h264Info, avcCodecString, buildAvcDecoderConfigurationRecord, toAvcSample };
+  // Page side of media-worker.js. Returns a stand-in for the media WebSocket (same fields and handlers, so the
+  // gateway code doesn't care where the socket lives) and a handle on the video pipeline running in the worker.
+  // The canvas is transferred to the worker: an element can be transferred only once, so every gateway needs
+  // a fresh one. Binary messages arrive as the audio envelopes alone, with event.meta = { bytes, receivedAt,
+  // arrivedAt } describing the whole message as the worker received it.
+  // audio = { sessionId, group }: audio gets a socket of its own in the worker (see media-worker.js).
+  // webrtc: false keeps media on the WebSocket; otherwise it moves to WebRTC DataChannels when the bridge
+  // offers them (media-ready), and back if they fail. callbacks.onTransport({ state, reason }) follows it.
+  function createWorkerSocket(url, protocol, canvas, { workerUrl = 'media-worker.js', video = {}, audio = null, webrtc = true, callbacks = {} } = {}) {
+    const worker = new Worker(workerUrl);
+    const offscreen = canvas.transferControlToOffscreen();
+    canvas.dataset.transferred = 'true';
+    let stats = { state: 'waiting-keyframe', lastError: null };
+    let terminateTimer = null;
+    const terminate = () => { clearTimeout(terminateTimer); try { worker.terminate(); } catch { /* gone */ } };
+    const socket = {
+      readyState: 0,
+      protocol: '',
+      binaryType: 'arraybuffer',
+      onopen: null, onmessage: null, onerror: null, onclose: null,
+      send(data) {
+        if (socket.readyState !== 1) throw new Error('media socket is not open');
+        worker.postMessage({ type: 'send', data });
+      },
+      close(code = 1000, reason = '') {
+        if (socket.readyState >= 2) return;
+        socket.readyState = 2;
+        worker.postMessage({ type: 'close', code, reason });
+        terminateTimer = setTimeout(terminate, 2000);
+      },
+    };
+    const closed = (event) => {
+      if (socket.readyState === 3) return;
+      socket.readyState = 3;
+      stopRtc('closed', false);
+      socket.onclose?.(event);
+      terminate();
+    };
+
+    // WebRTC is negotiated here, where RTCPeerConnection exists; the DataChannels go to the worker in the task
+    // that creates them (Chrome allows the transfer only then), so media never touches the main thread.
+    const RTC_CONNECT_TIMEOUT_MS = 8000;
+    let rtc = null;
+    const sendJson = (value) => { if (socket.readyState === 1) worker.postMessage({ type: 'send', data: JSON.stringify(value) }); };
+    const transport = (state, reason = null) => callbacks.onTransport?.({ state, reason });
+    function stopRtc(reason, tellBridge = true) {
+      if (!rtc) return;
+      const current = rtc;
+      rtc = null;
+      clearTimeout(current.timer);
+      try { current.pc.close(); } catch { /* closed */ }
+      if (tellBridge) sendJson({ type: 'webrtc-close', reason });
+      transport('websocket', reason);
+    }
+    async function startRtc() {
+      if (!webrtc || rtc || typeof RTCPeerConnection !== 'function') {
+        if (webrtc && typeof RTCPeerConnection !== 'function') transport('websocket', 'unsupported');
+        return;
+      }
+      let pc;
+      try {
+        pc = new RTCPeerConnection({ iceServers: [] });
+        const videoChannel = pc.createDataChannel('video', { ordered: false, maxPacketLifeTime: 150 });
+        // Lifetimes match webrtc.mjs: retransmitted only while still useful.
+        const audioChannel = pc.createDataChannel('audio', { ordered: false, maxPacketLifeTime: 80 });
+        worker.postMessage({ type: 'rtc-channels', video: videoChannel, audio: audioChannel }, [videoChannel, audioChannel]);
+      } catch {
+        try { pc?.close(); } catch { /* closed */ }
+        transport('websocket', 'unsupported');
+        return;
+      }
+      const current = { pc, timer: null };
+      rtc = current;
+      current.timer = setTimeout(() => { if (rtc === current) stopRtc('timeout'); }, RTC_CONNECT_TIMEOUT_MS);
+      pc.onconnectionstatechange = () => { if (rtc === current && pc.connectionState === 'failed') stopRtc('failed'); };
+      transport('connecting');
+      try {
+        await pc.setLocalDescription(await pc.createOffer());
+        await new Promise((resolve) => {
+          if (pc.iceGatheringState === 'complete') { resolve(); return; }
+          pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') resolve(); };
+          setTimeout(resolve, 1000);
+        });
+        if (rtc === current) sendJson({ type: 'webrtc-offer', sdp: pc.localDescription.sdp });
+      } catch {
+        if (rtc === current) stopRtc('offer-failed');
+      }
+    }
+    const rtcMessage = (text) => {
+      let message;
+      try { message = JSON.parse(text); } catch { return; }
+      if (message.type === 'media-ready') {
+        if (message.webrtc?.available) void startRtc();
+        else transport('websocket', message.webrtc?.reason || 'unavailable');
+      } else if (message.type === 'webrtc-answer' && rtc) {
+        const current = rtc;
+        current.pc.setRemoteDescription({ type: 'answer', sdp: message.sdp }).catch(() => { if (rtc === current) stopRtc('answer-rejected'); });
+      } else if (message.type === 'webrtc-active' && rtc) {
+        clearTimeout(rtc.timer);
+        transport('webrtc');
+      } else if (message.type === 'webrtc-unavailable' || message.type === 'webrtc-closed') {
+        if (rtc) stopRtc(message.reason || 'closed', false);
+        else transport('websocket', message.reason || 'closed');
+      }
+    };
+    worker.onmessage = (event) => {
+      const message = event.data || {};
+      switch (message.type) {
+        case 'socket-open': socket.readyState = 1; socket.protocol = message.protocol || ''; socket.onopen?.({}); break;
+        case 'socket-text':
+          if (message.data.includes('"media-ready"') || message.data.includes('"webrtc-')) rtcMessage(message.data);
+          socket.onmessage?.({ data: message.data });
+          break;
+        case 'socket-media': socket.onmessage?.({ data: message.audio || new ArrayBuffer(0), meta: { bytes: message.bytes, receivedAt: message.receivedAt, arrivedAt: message.arrivedAt } }); break;
+        case 'socket-error': socket.onerror?.({}); break;
+        case 'socket-close': closed({ code: message.code, reason: message.reason, wasClean: message.wasClean }); break;
+        case 'video-stats': {
+          const changed = message.stats?.state !== stats.state || message.stats?.lastError !== stats.lastError;
+          stats = message.stats || stats;
+          callbacks.onStats?.(stats);
+          if (changed) callbacks.onState?.(stats);
+          break;
+        }
+        case 'video-keyframe-needed': callbacks.onFrame?.({ keyframe: false, decoded: false, waitingKeyframe: true, info: null }); break;
+        case 'video-error': {
+          const error = new Error(message.message);
+          if (message.name) error.name = message.name;
+          callbacks.onError?.(error);
+          break;
+        }
+        case 'video-hardware-fallback': callbacks.onHardwareFallback?.({ codecFamily: message.codecFamily }); break;
+        case 'audio-stats': callbacks.onAudioStats?.(message.stats); break;
+        case 'audio-error': callbacks.onAudioError?.(new Error(message.message)); break;
+        case 'audio-socket-fallback': callbacks.onAudioSocketFallback?.(); break;
+        default: break;
+      }
+    };
+    // The worker script failed to load or crashed: report it like a dropped socket.
+    worker.onerror = () => { socket.onerror?.({}); closed({ code: 1006, reason: 'media worker failed', wasClean: false }); };
+    worker.postMessage({ type: 'open', url, protocol, canvas: offscreen, video, audio: audio ? { url, ...audio } : null }, [offscreen]);
+    const pipeline = {
+      worker: true,
+      get state() { return stats.state; },
+      get stats() { return { ...stats }; },
+      ingest: () => false,
+      stop: () => {},
+      flush: () => {},
+    };
+    // Audio decoding moves into the worker once the page's worklet is ready (createWorkerAudioOutput).
+    const attachAudio = (port) => worker.postMessage({ type: 'audio-port', port }, [port]);
+    return { socket, pipeline, attachAudio };
+  }
+
+  // Page side of audio decoded in the media worker: the AudioContext, a gain node and the jitter-buffer
+  // worklet, plus a MessagePort (ready) for the worker to send decoded audio straight to the worklet, so
+  // neither decoding nor playout waits for the main thread. Same interface as createAudioPipeline for the app
+  // (state, stats, resume, stop); decodeStats() takes the worker decoder's stats.
+  function createWorkerAudioOutput({ audioContext = null, workletUrl, sampleRate = 48000, channels = 2, volume = 1, callbacks = {} } = {}) {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    const ownsContext = !audioContext;
+    const context = audioContext || new AudioContextCtor({ latencyHint: 'interactive', sampleRate });
+    let decoder = { state: 'waiting' };
+    let output = {};
+    let node = null;
+    let gain = null;
+    let closed = false;
+    const report = () => callbacks.onState?.(stats());
+    const stats = () => ({ ...decoder, ...output, contextState: context.state, state: closed ? 'stopped' : context.state !== 'running' && decoder.state === 'playing' ? 'autoplay-blocked' : decoder.state });
+    const ready = loadWorkletModule(context, workletUrl).then(() => {
+      if (closed) throw new Error('audio output closed');
+      gain = context.createGain();
+      gain.gain.value = volume;
+      gain.connect(context.destination);
+      node = new AudioWorkletNode(context, 'sunbridge-audio-player', { numberOfInputs: 0, outputChannelCount: [channels], processorOptions: { channels, sampleRate } });
+      node.port.onmessage = (event) => {
+        if (event.data?.type === 'stats') output = { bufferedMs: event.data.bufferedMs, targetBufferMs: event.data.targetMs, underruns: event.data.underruns };
+      };
+      node.connect(gain);
+      const channel = new MessageChannel();
+      node.port.postMessage({ type: 'port', port: channel.port2 }, [channel.port2]);
+      return channel.port1;
+    });
+    return {
+      worker: true,
+      ready,
+      get state() { return stats().state; },
+      get stats() { return stats(); },
+      decodeStats(next) {
+        const changed = next?.state !== decoder.state || next?.lastError !== decoder.lastError;
+        decoder = next || decoder;
+        if (changed) report();
+      },
+      ingest: () => false,
+      async resume() {
+        if (closed) return false;
+        try { await context.resume(); } catch { /* still blocked */ }
+        report();
+        return context.state === 'running';
+      },
+      stop() {
+        if (closed) return;
+        closed = true;
+        try { node?.disconnect(); } catch { /* gone */ }
+        try { gain?.disconnect(); } catch { /* gone */ }
+        if (ownsContext) { try { void context.close(); } catch { /* closed */ } }
+        report();
+      },
+      flush: async () => {},
+    };
+  }
+
+  const api = { createWorkerSocket, createWorkerAudioOutput, MAGIC, VERSION, STREAM_IDS, VIDEO_FLAGS, AUDIO_PAYLOAD_TYPES, FRAME_HEADER_BYTES, recoverShards, createFrameAssembler, parseRtp, parseEnvelope, forEachEnvelope, hevcInfo, hevcCodecString, av1Info, av1CodecString, parseVideoPacket, parseAudioPacket, createVideoPipeline, createAudioPipeline, h264Info, avcCodecString, buildAvcDecoderConfigurationRecord, toAvcSample };
   if (typeof window !== 'undefined') window.SunbridgeMedia = api;
   if (typeof globalThis !== 'undefined') globalThis.SunbridgeMedia = api;
 })();

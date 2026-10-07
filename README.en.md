@@ -35,14 +35,17 @@ Sunbridge runs on your own computer (usually the one running Sunshine) and turns
 
 ## Highlights
 
-- **Most efficient codec automatically**: AV1 or HEVC when the browser hardware-decodes them (30–50% less bitrate than H.264 for the same picture), H.264 otherwise.
-- **Pass-through, never re-encoded**: the browser decodes the host's original bitstream with WebCodecs (hardware first). No extra quality loss or latency.
+- **Most efficient codec automatically**: AV1 or HEVC when the browser hardware-decodes them at the stream's resolution and frame rate (30–50% less bitrate than H.264 for the same picture), otherwise the host encodes H.264. If hardware decoding turns out to be unavailable mid-stream, or software decoding can't keep up, it switches automatically.
+- **Pass-through, never re-encoded**: the browser decodes the host's original bitstream with WebCodecs (hardware first). No extra quality loss or latency. Receiving, decoding and drawing run in a worker, so a busy page can't hold up the video, and the decoder picks hardware first for the actual bitstream and size.
+- **WebRTC (UDP) transport**: video and audio over UDP, so a lost packet costs only its frame instead of stalling the whole TCP connection; paths through a VPS or across ISPs reach their full bandwidth. Falls back to the WebSocket when UDP can't get through. Needs one UDP port open (see below).
 - **Lean transport**: video is assembled into whole frames before it leaves your machine, so FEC redundancy and packet headers don't travel over the internet (about 25–30% less bandwidth, given back to the encoder as quality).
 - **Adaptive resolution**: matches the browser window in device pixels for crisp text, and follows resizes, rotation and fullscreen.
-- **Adaptive bitrate with a hard cap**: driven by queueing delay and measured throughput to the browser; the configured bitrate is a ceiling the encoder is held to.
+- **Two-leg adaptive bitrate with a hard cap**: host → bridge (packet loss, frames FEC couldn't repair) and bridge → browser (queueing delay, backlog, measured throughput) are probed separately and the lower one wins; the stats panel shows both legs. The configured bitrate is a ceiling the encoder is held to.
 - **Bounded latency**: under congestion whole frames are dropped until the next keyframe, so the picture pauses briefly instead of smearing or drifting behind.
 - **Automatic reconnect**: survives network changes, sleep/wake and service restarts; a reloaded page can rejoin the running stream.
 - **Remote desktop mode**: absolute pointer, tap / drag / long-press / two-finger gestures, on-screen keyboard with full text input (including CJK).
+- **Clipboard sync**: copied text and images (PNG) between this device and the host; large images go through the host's HTTPS endpoint. Needs [Foundation Sunshine](https://github.com/AlkaidLab/foundation-sunshine) with clipboard sync on and its desktop app running. The browser asks once to allow clipboard reading; without it, the stream toolbar's button sends the clipboard.
+- **Diagnosis**: the Network page checks every leg: host ports, Sunshine status and pairing, RTSP, the bridge's entrypoints and WebRTC, a real WebRTC connection from the browser, and while streaming the UDP video / audio / control traffic.
 - **Game mode**: pointer lock with relative motion, gamepads with rumble.
 - **Glitch-free audio**: Opus stereo played through a jitter buffer with clock-drift correction.
 - **Set up in the browser**: create the account in the web page on first start; access, certificates and two-step verification are all web settings, and `start.bat` / `start.sh` only start the bridge and get you back in.
@@ -59,13 +62,13 @@ Sunbridge runs on your own computer (usually the one running Sunshine) and turns
 
 ```
               same machine (or LAN)                            internet / LAN
-┌───────────┐   UDP (RTP / FEC)    ┌─────────────┐   HTTPS + WebSocket   ┌──────────────┐
+┌───────────┐   UDP (RTP / FEC)    ┌─────────────┐  WebRTC / WebSocket   ┌──────────────┐
 │ Sunshine  │ ───────────────────▶ │  Sunbridge  │ ────────────────────▶ │   Browser    │
 │ (encoder) │ ◀─────────────────── │  (bridge)   │ ◀──────────────────── │ (WebCodecs)  │
 └───────────┘ control (encrypted)  └─────────────┘  keyboard/mouse/pads  └──────────────┘
 ```
 
-Sunbridge pairs with Sunshine, negotiates the stream and receives the media, then sends whole video frames and audio to the browser over a single WebSocket. The browser decodes, plays and captures input. It speaks the standard GameStream protocol, so the host needs no changes.
+Sunbridge pairs with Sunshine, negotiates the stream and receives the media, then sends whole video frames and audio to the browser: over WebRTC when UDP gets through, else over the WebSocket, which always carries control messages and input. The browser decodes, plays and captures input. It speaks the standard GameStream protocol, so the host needs no changes.
 
 ## Quick start
 
@@ -101,7 +104,7 @@ Choose where a code is asked for: **at login** (on by default), **starting a str
 ```
 sunbridge/
 ├─ start.bat / start.sh   start and manage
-├─ app/                   the program (replace it to upgrade)
+├─ app/                   the program (replace it to upgrade; dependencies go to app/node_modules on first start)
 ├─ data/                  your data, created on first run (git-ignored)
 └─ docs/                  images for the docs
 ```
@@ -111,6 +114,15 @@ sunbridge/
 ## Environment variables (optional)
 
 Settings live in `data/config.json` and are edited in the web page. When the port / bind variables are set they define a single entrypoint and the web entrypoint settings become read-only: `SUNBRIDGE_PORT`, `SUNBRIDGE_BIND`, `SUNBRIDGE_TLS` (`off` disables HTTPS), `SUNBRIDGE_TLS_CERT`, `SUNBRIDGE_TLS_KEY`, `SUNBRIDGE_TRUST_PROXY`, `SUNBRIDGE_TRUSTED_PROXIES`, `SUNBRIDGE_ALLOWED_ORIGINS`, `SUNBRIDGE_DATA_DIR`.
+
+## WebRTC (UDP)
+
+The browser must reach one UDP port on the bridge, by default the same number as the web port (e.g. 8091/TCP and 8091/UDP):
+- Direct: forward that UDP port on the router to the Sunbridge machine and allow it in the firewall.
+- Through a VPS (EasyTier, frp, ...): add a **UDP forward of the same port** to this machine and allow UDP in the VPS firewall, e.g. EasyTier `--port-forward udp://0.0.0.0:8091/<virtual IP of the PC>:8091`.
+- The address is the one the page was opened with; behind a reverse proxy, or with a different UDP port, set the public address in Access → WebRTC (UDP).
+
+If UDP can't get through, media moves to the WebSocket after about 8 seconds and the stats panel ("Media channel") says why. The `node-datachannel` dependency is installed on the first start; without it (offline, npm blocked) WebRTC is unavailable and everything else works. `./start.sh deps` (Windows: `start.bat deps`, or “install / repair dependencies” in the menu) installs it again and explains a failure.
 
 ## Browser support
 

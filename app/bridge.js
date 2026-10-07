@@ -163,6 +163,18 @@
       return this.request('/api/bridge/ping', { method: 'POST', body: input });
     }
 
+    // Full check of the host, the stream and the bridge (server-side part of the Network page's diagnosis).
+    async diagnose(hostOrInput) {
+      const input = this.inputForHost(hostOrInput);
+      if (this.demo) return { ...(await this.ping(hostOrInput)), checks: [] };
+      return this.request('/api/bridge/diagnose', { method: 'POST', body: input, timeoutMs: 30000 });
+    }
+
+    // Answer for a test WebRTC connection to the bridge's UDP port.
+    async webrtcTest(sdp) {
+      return this.request('/api/bridge/webrtc-test', { method: 'POST', body: { sdp }, timeoutMs: 10000 });
+    }
+
     async wake(hostOrInput, mac) {
       const input = this.inputForHost(hostOrInput);
       if (mac) input.mac = mac;
@@ -179,8 +191,8 @@
       return result.host;
     }
 
-    async launch({ hostName, hostId, address, appName, appId, width = 1920, height = 1080, fps = 60, bitrateMode = 'auto', videoCodecs = ['h264'] }) {
-      const input = { hostName, hostId, address, appName, appId, width, height, fps, bitrateMode, videoCodecs, frames: true };
+    async launch({ hostName, hostId, address, appName, appId, width = 1920, height = 1080, fps = 60, bitrateMode = 'auto', videoCodecs = ['h264'], codecProbe = null, codecChoice = null }) {
+      const input = { hostName, hostId, address, appName, appId, width, height, fps, bitrateMode, videoCodecs, codecProbe, codecChoice, frames: true };
       if (this.demo) {
         await wait(360);
         const host = this.getHost(input);
@@ -232,7 +244,7 @@
       return result;
     }
 
-    mediaGateway({ sessionId, onOpen, onPacket, onMessage, onClose, onError } = {}) {
+    mediaGateway({ sessionId, onOpen, onPacket, onMessage, onClose, onError, video = null } = {}) {
       const makeError = (i18nKey, fallback, extra = {}) => {
         const error = new Error(window.t ? window.t(i18nKey) : fallback);
         error.errorCode = extra.errorCode || 'MEDIA_GATEWAY_FAILED';
@@ -278,7 +290,16 @@
         url = new URL('/api/bridge/media', this.baseUrl);
         if (sessionId) url.searchParams.set('sessionId', sessionId);
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-        gateway.socket = new window.WebSocket(url.toString(), 'sunbridge-media-v1');
+        // video = { canvas, options, callbacks }: the socket lives in a worker that also decodes and draws the
+        // video (media-worker.js); gateway.videoPipeline is its handle. Otherwise a plain WebSocket.
+        if (video?.canvas) {
+          const worker = window.SunbridgeMedia.createWorkerSocket(url.toString(), 'sunbridge-media-v1', video.canvas, { video: video.options, audio: video.audio || null, webrtc: video.webrtc !== false, callbacks: video.callbacks });
+          gateway.socket = worker.socket;
+          gateway.videoPipeline = worker.pipeline;
+          gateway.workerControl = worker;
+        } else {
+          gateway.socket = new window.WebSocket(url.toString(), 'sunbridge-media-v1');
+        }
         gateway.socket.binaryType = 'arraybuffer';
       } catch (error) {
         const failure = makeError('error.mediaGatewayFailed', 'The browser media gateway failed.', { cause: error });
@@ -300,7 +321,7 @@
         }
         gateway.state = 'connected';
         // frames: whole video frames assembled by the bridge (no FEC parity / RTP headers over this link).
-        gateway.send({ type: 'subscribe', sessionId: sessionId || null, frames: true });
+        gateway.send({ type: 'subscribe', sessionId: sessionId || null, frames: true, ...(video?.subscribe || {}) });
         onOpen?.({ protocol: gateway.socket.protocol || 'sunbridge-media-v1', sessionId: sessionId || null });
       };
       // Hot path (thousands of packets per second): stay synchronous for ArrayBuffer data.
@@ -308,7 +329,7 @@
         if (gateway.closed) return;
         const data = event.data;
         if (data instanceof ArrayBuffer) {
-          onPacket?.(data);
+          onPacket?.(data, event.meta || null);
           return;
         }
         if (typeof data === 'string') {

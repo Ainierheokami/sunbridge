@@ -9,12 +9,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { URL } from 'node:url';
+import { spawn } from 'node:child_process';
 import { ControlStream, encodeBrowserInput } from './control.mjs';
 import { createAuth } from './auth.mjs';
 import { createLog, LOG_CATEGORIES } from './log.mjs';
+import { rtcSupport, answerOffer, fragmentFrame } from './webrtc.mjs';
+import * as Clipboard from './clipboard.mjs';
 import {
   loadConfig as loadNetConfig, saveConfig as saveNetConfig, validateConfig, environmentEntrypoint, makeAddressMatcher, isLoopbackAddress,
   hostAllowed, scanCertificates, pickCertificate, storeCertificate, deleteCertificate, nginxSnippet,
+  parseHost, validateWebrtc, DEFAULT_PORT as DEFAULT_ENTRY_PORT,
 } from './netconfig.mjs';
 import tls from 'node:tls';
 // The browser's media code (RTP / FEC / frame assembly) also runs here: the bridge assembles video frames itself.
@@ -578,7 +582,13 @@ function hostPublic(host) {
     serverFingerprint: host.serverFingerprint || null,
     mac: host.mac || null,
     stream: normalizeStreamSettings(host.stream),
+    // What the host encodes (from /serverinfo), so the page can pick a decoder for it; null until read.
+    codecs: host.serverInfo ? hostCodecList(host.serverInfo.serverCodecModeSupport || 0) : null,
   };
+}
+
+function hostCodecList(flags) {
+  return ['h264', flags & SCM_HEVC && 'hevc', flags & SCM_AV1_MAIN8 && 'av1'].filter(Boolean);
 }
 
 // Per-host stream overrides; null means "use the client default" (bitrate: derived from resolution and fps).
@@ -892,10 +902,14 @@ function requestHost(host, endpoint, params = {}, options = {}) {
       hostname: host.address,
       port,
       path: requestPath,
-      method: 'GET',
+      method: options.method || 'GET',
       // Sunshine closes the connection after each response; reusing a pooled socket races that close.
       agent: false,
-      headers: { Accept: 'application/xml, text/xml, */*', 'User-Agent': 'Sunbridge/0.2', Connection: 'close' },
+      headers: {
+        Accept: 'application/xml, text/xml, */*', 'User-Agent': 'Sunbridge/0.2', Connection: 'close',
+        ...(options.body ? { 'Content-Type': 'application/octet-stream', 'Content-Length': options.body.length } : {}),
+        ...(options.headers || {}),
+      },
       timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
     };
     if (secure) {
@@ -908,7 +922,9 @@ function requestHost(host, endpoint, params = {}, options = {}) {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
+        const raw = Buffer.concat(chunks);
+        // options.binary: the body as a Buffer (clipboard blobs), else text.
+        const body = options.binary ? raw : raw.toString('utf8');
         if (secure && host.serverCertBase64) {
           const peer = request.socket?.getPeerCertificate?.(true) || response.socket?.getPeerCertificate?.(true);
           if (peer?.raw && !peer.raw.equals(unbase64(host.serverCertBase64))) {
@@ -918,7 +934,7 @@ function requestHost(host, endpoint, params = {}, options = {}) {
         }
         const statusCode = response.statusCode || 0;
         if (statusCode < 200 || statusCode >= 300) {
-          reject(bridgeError(`Sunshine 返回 HTTP ${statusCode}: ${body.slice(0, 240)}`, 'SUNSHINE_REQUEST_FAILED', { statusCode }));
+          reject(bridgeError(`Sunshine 返回 HTTP ${statusCode}: ${raw.toString('utf8', 0, 240)}`, 'SUNSHINE_REQUEST_FAILED', { statusCode }));
           return;
         }
         resolve({ body, statusCode, elapsedMs: Math.round(performance.now() - started), secure });
@@ -932,7 +948,7 @@ function requestHost(host, endpoint, params = {}, options = {}) {
       const errorCode = nodeCode === 'ENOTFOUND' || nodeCode === 'EAI_AGAIN' ? 'HOST_NOT_FOUND' : nodeCode === 'CERT_HAS_EXPIRED' ? 'TLS_CERTIFICATE_MISMATCH' : 'SUNSHINE_UNAVAILABLE';
       reject(setErrorCode(error, errorCode));
     });
-    request.end();
+    request.end(options.body);
   });
 }
 
@@ -1227,6 +1243,9 @@ function createMediaStats(serverPort = null, clientPort = null) {
     serverPort,
     clientPort,
     bitrateKbps: null,
+    // RTP sequence gaps: packets that never reached the bridge (host -> bridge loss, before FEC).
+    lostPackets: 0,
+    lastSequence: null,
     rtp: null,
   };
 }
@@ -1400,6 +1419,11 @@ function broadcastMediaPacket(session, streamName, packet) {
   if (streamName === 'audio') gateway.audioPackets += 1;
   for (const client of mediaGatewayClients) {
     if (client.session !== session) continue;
+    // Audio: to sockets that asked for it, and over WebRTC to a browser whose DataChannels are up, never twice
+    // (that browser's audio-only socket stays quiet meanwhile).
+    if (streamName === 'audio') {
+      if (client.rtc?.ready ? false : !client.wantsAudio || (!client.wantsVideo && rtcGroups.has(client.group))) continue;
+    } else if (!client.wantsVideo) continue;
     if (client.wantsFrames && streamName === 'video') continue; // gets whole frames instead
     if (client.draining && streamName === 'video') {
       if (Date.now() - client.draining > DRAIN_MAX_MS) stopDraining(client);
@@ -1410,7 +1434,7 @@ function broadcastMediaPacket(session, streamName, packet) {
       }
     }
     // Audio (~100 kbps) is never dropped: it can't relieve a backlog, it would only crackle.
-    if (streamName === 'video' && client.socket.writableLength + client.mediaBatchBytes > backpressureLimit(session)) {
+    if (streamName === 'video' && client.mediaBacklogBytes() > backpressureLimit(session)) {
       client.droppedPackets += 1;
       gateway.droppedPackets = (gateway.droppedPackets || 0) + 1;
       continue;
@@ -1425,6 +1449,9 @@ function broadcastMediaPacket(session, streamName, packet) {
     emitSessionEvent('media-gateway-stats', { stream: streamName });
   }
 }
+
+// Gateway groups (a browser's sockets) whose video socket has WebRTC up.
+const rtcGroups = new Set();
 
 function hasFrameClients(session) {
   for (const client of mediaGatewayClients) if (client.session === session && client.wantsFrames) return true;
@@ -1476,9 +1503,9 @@ function broadcastFrame(session, runtime, frame) {
   const keyframe = frame.frameType === 2;
   const receivedAt = Date.now() >>> 0;
   for (const client of mediaGatewayClients) {
-    if (client.session !== session || !client.wantsFrames) continue;
+    if (client.session !== session || !client.wantsFrames || !client.wantsVideo) continue;
     if (client.draining && Date.now() - client.draining > DRAIN_MAX_MS) stopDraining(client);
-    const congested = client.draining || client.socket.writableLength + client.mediaBatchBytes > backpressureLimit(session);
+    const congested = client.draining || client.mediaBacklogBytes() > backpressureLimit(session);
     if (congested || (client.skipToKeyframe && !keyframe)) {
       client.droppedFrames = (client.droppedFrames || 0) + 1;
       client.framesLostSinceSent = (client.framesLostSinceSent || 0) + 1;
@@ -1511,10 +1538,15 @@ function backpressureLimit(session) {
 }
 
 // ---------------------------------------------------------------------------
-// Adaptive bitrate. Signals (worst browser wins): queueing delay reported by the browser (one-way delay above
-// its recent minimum), bytes waiting in the bridge's send queue, packets dropped for backpressure, and the
-// bandwidth the browser actually receives. Congestion -> quickly below the measured throughput; a clean link
-// -> step back up towards the configured bitrate.
+// Adaptive bitrate as two control segments, each with its own limit:
+//  - host -> bridge (UDP from Sunshine): hostKbps drops when RTP packets or whole frames go missing before they
+//    reach the bridge (host on Wi-Fi, bridge on another machine, bridge too busy to read the socket) and
+//    recovers while that leg is clean. With Sunshine on the same machine it never binds.
+//  - bridge -> browser (one WebSocket each, worst browser wins): linkKbps follows the queueing delay the browser
+//    measures, the bridge's unsent backlog and frames dropped for backpressure; on congestion it falls below the
+//    throughput the browser actually received.
+// What may go over the wire is min(configured cap, hostKbps, linkKbps); governRate() turns that into the
+// encoder setting. A segment ramps up quickly while far below the rate it last broke at, and creeps near it.
 // ---------------------------------------------------------------------------
 // Hard cap: what actually arrives from Sunshine (video + audio + FEC, measured over 3 s) must stay within the
 // target. Encoders overshoot (AMF/QSV rate control, keyframes) and live bitrate changes don't reserve audio,
@@ -1544,52 +1576,144 @@ function governRate(session) {
   void applyBitrate(session, abr.targetKbps, measuredKbps > abr.targetKbps ? 'over-target' : 'relax', { force: true });
 }
 
+function createAbrSegment(kbps) {
+  return { kbps, state: 'starting', goodSince: null, changedAt: Date.now(), ceilingKbps: null };
+}
+
+// One control step. signal = { congested, severe, clean, capacityKbps }; returns nothing, moves segment.kbps.
+function stepSegment(segment, signal, { capKbps, targetKbps, now }) {
+  if (signal.congested) {
+    segment.goodSince = null;
+    segment.state = 'congested';
+    // Let the previous decrease show up in the measurements before cutting again.
+    if (now - segment.changedAt < (signal.severe ? 1500 : 2500)) return;
+    const from = Math.min(segment.kbps, targetKbps);
+    const capacity = signal.capacityKbps ? signal.capacityKbps * 0.9 : Infinity;
+    const next = Math.max(ABR_MIN_KBPS, Math.min(from * (signal.severe ? 0.65 : 0.85), capacity));
+    if (next >= segment.kbps * 0.97) return;
+    segment.ceilingKbps = from;
+    segment.kbps = next;
+    segment.changedAt = now;
+    return;
+  }
+  if (!signal.clean) { segment.goodSince = null; segment.state = 'holding'; return; }
+  segment.goodSince ||= now;
+  // Not the segment that sets the target: nothing to learn above it.
+  if (segment.kbps >= capKbps || segment.kbps > targetKbps * 1.02) { segment.kbps = Math.min(segment.kbps, capKbps); segment.state = 'stable'; return; }
+  segment.state = 'probing';
+  if (now - segment.goodSince < 3000 || now - segment.changedAt < 3000) return;
+  const fast = !segment.ceilingKbps || segment.kbps < segment.ceilingKbps * 0.75;
+  segment.kbps = Math.min(capKbps, fast ? segment.kbps * 1.25 + 250 : segment.kbps * 1.06 + 100);
+  if (segment.ceilingKbps && segment.kbps > segment.ceilingKbps * 1.1) segment.ceilingKbps = null;
+  segment.goodSince = now;
+  segment.changedAt = now;
+}
+
+// host -> bridge: FEC repairs light loss; frames it couldn't repair, or loss close to the FEC budget, mean the
+// leg is saturated. Measured once a second by sampleRates().
+function hostSignal(session) {
+  const leg = session.hostLeg;
+  if (!leg) return null;
+  const fec = session.fecPercent ?? ASSUMED_FEC_PERCENT;
+  const severe = leg.unrecoveredFrames > 3 || leg.lossPercent > Math.max(10, fec);
+  return {
+    severe,
+    congested: severe || leg.unrecoveredFrames > 0 || leg.lossPercent > Math.max(2, fec / 4),
+    clean: leg.unrecoveredFrames === 0 && leg.lossPercent < 0.5,
+    capacityKbps: null,
+  };
+}
+
+// bridge -> browser, worst browser wins.
+function linkSignal(session, now) {
+  const abr = session.abr;
+  let queueDelayMs = 0;
+  let backlogMs = 0;
+  let drops = 0;
+  let clients = 0;
+  let capacityKbps = null;
+  for (const client of mediaGatewayClients) {
+    // Audio-only sockets carry no feedback; their browser's video socket speaks for the link.
+    if (client.session !== session || !client.wantsVideo) continue;
+    clients += 1;
+    const feedback = client.feedback && now - client.feedback.at < 3000 ? client.feedback : null;
+    if (feedback) {
+      queueDelayMs = Math.max(queueDelayMs, feedback.queueDelayMs || 0);
+      // What a browser received is its capacity only while the link was the limit (a queue building up), and
+      // not while the bridge held video back (draining), when it got little more than audio.
+      if (feedback.receivedKbps > 0 && feedback.queueDelayMs > 60 && !client.draining) {
+        capacityKbps = capacityKbps == null ? feedback.receivedKbps : Math.min(capacityKbps, feedback.receivedKbps);
+      }
+    }
+    backlogMs = Math.max(backlogMs, (client.mediaBacklogBytes() * 8) / abr.targetKbps);
+    // Packet clients drop packets, frame clients whole frames: both are backpressure.
+    const dropped = client.droppedPackets + client.droppedFrames;
+    drops += dropped - (client.abrDropsSeen || 0);
+    client.abrDropsSeen = dropped;
+  }
+  if (!clients) return null;
+  Object.assign(abr, { queueDelayMs: Math.round(queueDelayMs), backlogMs: Math.round(backlogMs), receivedKbps: capacityKbps });
+  const severe = queueDelayMs > 400 || backlogMs > 800 || drops > 20;
+  return {
+    severe,
+    congested: severe || queueDelayMs > 120 || backlogMs > 250 || drops > 0,
+    clean: queueDelayMs < 40 && backlogMs < 60 && drops === 0,
+    capacityKbps,
+  };
+}
+
 function evaluateAbr(session) {
   const abr = session.abr;
   if (!abr || session.reconnect || abr.applying) return;
   governRate(session);
   if (abr.mode !== 'auto' || abr.applying) return;
   const now = Date.now();
-  let queueDelayMs = 0;
-  let receivedKbps = null;
-  let backlogMs = 0;
-  let drops = 0;
-  let clients = 0;
+  const link = linkSignal(session, now);
+  if (!link) return;
+  const host = hostSignal(session);
+  const limits = { capKbps: abr.capKbps, targetKbps: abr.targetKbps, now };
+  if (host) stepSegment(abr.host, host, limits);
+  stepSegment(abr.link, link, limits);
+  const hostBinds = abr.host.kbps < abr.link.kbps;
+  abr.limitedBy = Math.min(abr.host.kbps, abr.link.kbps) >= abr.capKbps ? 'cap' : hostBinds ? 'host' : 'link';
+  abr.state = abr.host.state === 'congested' || abr.link.state === 'congested' ? 'congested' : (hostBinds ? abr.host : abr.link).state;
+  const desired = Math.min(abr.capKbps, abr.host.kbps, abr.link.kbps);
+  if (Math.abs(desired - abr.targetKbps) < abr.targetKbps * 0.03) return;
+  const reason = desired > abr.targetKbps ? 'probe-up' : hostBinds ? 'host-loss' : link.severe ? 'severe-congestion' : 'congestion';
+  void applyBitrate(session, desired, reason);
+}
+
+// Once a second, from byte counters (a rate computed on packet arrival goes stale when the stream stalls):
+// host -> bridge UDP rates and loss, what was forwarded after FEC was stripped, and each browser's send rate.
+function sampleRates(session, runtime) {
+  const now = Date.now();
+  const media = session.transport.media;
+  const counters = {
+    video: media.video?.bytes || 0,
+    audio: media.audio?.bytes || 0,
+    forwarded: media.forwardedBytes || 0,
+    packets: media.video?.packets || 0,
+    lost: media.video?.lostPackets || 0,
+    frames: runtime?.frameAssembler?.stats.lostFrames || 0,
+  };
+  const last = session.rateSample;
+  session.rateSample = { at: now, ...counters };
+  // A counter going backwards = media stats recreated by a reconnect: start over.
+  if (last && now > last.at && Object.keys(counters).every((key) => counters[key] >= last[key])) {
+    const kbps = (key) => Math.round(((counters[key] - last[key]) * 8) / (now - last.at));
+    const lost = counters.lost - last.lost;
+    const received = counters.packets - last.packets;
+    session.rates = { videoKbps: kbps('video'), audioKbps: kbps('audio'), forwardedKbps: kbps('forwarded') };
+    session.hostLeg = {
+      lossPercent: received + lost > 0 ? Math.round((lost * 1000) / (received + lost)) / 10 : 0,
+      unrecoveredFrames: counters.frames - last.frames,
+    };
+  }
   for (const client of mediaGatewayClients) {
     if (client.session !== session) continue;
-    clients += 1;
-    const feedback = client.feedback && now - client.feedback.at < 3000 ? client.feedback : null;
-    if (feedback) {
-      queueDelayMs = Math.max(queueDelayMs, feedback.queueDelayMs || 0);
-      if (feedback.receivedKbps > 0) receivedKbps = receivedKbps == null ? feedback.receivedKbps : Math.min(receivedKbps, feedback.receivedKbps);
-    }
-    backlogMs = Math.max(backlogMs, ((client.socket.writableLength + client.mediaBatchBytes) * 8) / abr.targetKbps);
-    drops += client.droppedPackets - (client.abrDropsSeen || 0);
-    client.abrDropsSeen = client.droppedPackets;
-  }
-  if (!clients) return;
-  Object.assign(abr, { queueDelayMs: Math.round(queueDelayMs), backlogMs: Math.round(backlogMs), receivedKbps });
-  const severe = queueDelayMs > 400 || backlogMs > 800 || drops > 20;
-  const congested = severe || queueDelayMs > 120 || backlogMs > 250 || drops > 0;
-  if (congested) {
-    abr.goodSince = null;
-    abr.state = 'congested';
-    if (now - abr.lastChangeAt < (severe ? 1000 : 2000)) return;
-    const throughputCap = receivedKbps ? receivedKbps * 0.85 : Infinity;
-    const next = Math.max(ABR_MIN_KBPS, Math.min(abr.targetKbps * (severe ? 0.6 : 0.8), throughputCap));
-    if (next < abr.targetKbps * 0.95) void applyBitrate(session, next, severe ? 'severe-congestion' : 'congestion');
-    return;
-  }
-  if (queueDelayMs < 40 && backlogMs < 60) {
-    abr.state = abr.targetKbps < abr.capKbps ? 'probing' : 'stable';
-    abr.goodSince ||= now;
-    if (abr.targetKbps < abr.capKbps && now - abr.goodSince >= 4000 && now - abr.lastChangeAt >= 4000) {
-      abr.goodSince = now;
-      void applyBitrate(session, Math.min(abr.capKbps, abr.targetKbps * 1.12 + 250), 'probe-up');
-    }
-  } else {
-    abr.goodSince = null;
-    abr.state = 'holding';
+    const previous = client.rateSample;
+    client.rateSample = { at: now, bytes: client.sentBytes };
+    if (previous && now > previous.at) client.sentKbps = Math.round(((client.sentBytes - previous.bytes) * 8) / (now - previous.at));
   }
 }
 
@@ -1689,6 +1813,18 @@ class MediaGatewayClient {
     this.closeNotified = false;
     this.corked = false;
     this.droppedPackets = 0;
+    this.droppedFrames = 0;
+    // What this socket carries (subscribe message). A browser can take audio on a socket of its own, so a
+    // video retransmission stall on one TCP connection doesn't hold up the audio; group links its sockets.
+    this.wantsAudio = true;
+    this.wantsVideo = true;
+    this.group = null;
+    // WebRTC media path (webrtc.mjs): { pc, video, audio, ready, videoSequence } while negotiated.
+    this.rtc = null;
+    this.rtcStatus = null;
+    this.hostHeader = null;
+    // Media bytes handed to this browser's socket (for the bridge -> browser send rate).
+    this.sentBytes = 0;
     this.mediaBatch = [];
     this.mediaBatchBytes = 0;
     this.mediaAudioCount = 0;
@@ -1728,8 +1864,17 @@ class MediaGatewayClient {
   // Media envelopes that arrive in the same event-loop turn (a UDP burst: one video frame is many packets)
   // go out as ONE WebSocket message of back-to-back envelopes. The browser then handles one message event
   // per burst instead of one per packet.
+  // Unsent media for this browser: what the DataChannels hold while WebRTC carries it, else the socket's.
+  mediaBacklogBytes() {
+    if (this.rtc?.ready) {
+      try { return this.rtc.video.bufferedAmount() + this.rtc.audio.bufferedAmount(); } catch { return 0; }
+    }
+    return this.socket.writableLength + this.mediaBatchBytes;
+  }
+
   queueMedia(envelope) {
     if (this.closed || this.socket.destroyed || this.socket.writableEnded) return false;
+    if (this.rtc?.ready && this.sendRtc(envelope)) return true;
     // Audio first: a few hundred bytes that must not wait behind a burst of video packets.
     if (envelope[5] === MEDIA_STREAM_IDS.audio) this.mediaBatch.splice(this.mediaAudioCount++, 0, envelope);
     else this.mediaBatch.push(envelope);
@@ -1753,6 +1898,7 @@ class MediaGatewayClient {
     if (this.closed || this.socket.destroyed || this.socket.writableEnded) return;
     try {
       this.socket.cork();
+      this.sentBytes += length;
       this.socket.write(websocketHeader(0x2, length));
       for (const envelope of batch) this.socket.write(envelope);
       this.socket.uncork();
@@ -1830,8 +1976,17 @@ class MediaGatewayClient {
         this.close(1008, 'session mismatch');
       } else if (message?.type === 'subscribe') {
         this.wantsFrames = message.frames === true;
+        this.wantsAudio = message.audio !== false;
+        this.wantsVideo = message.video !== false;
+        this.group = typeof message.group === 'string' ? message.group.slice(0, 64) : null;
       } else if (message?.type === 'input') {
         handleBrowserInput(this.session, message);
+      } else if (message?.type === 'webrtc-offer' && typeof message.sdp === 'string') {
+        void this.startRtc(message.sdp);
+      } else if (message?.type === 'webrtc-close') {
+        this.stopRtc(typeof message.reason === 'string' ? message.reason.slice(0, 40) : 'browser');
+      } else if (message?.type === 'switch-codec') {
+        switchVideoCodec(this.session, message.codecs);
       } else if (message?.type === 'request-idr') {
         requestIdrFrame(this.session);
       } else if (message?.type === 'feedback') {
@@ -1857,8 +2012,121 @@ class MediaGatewayClient {
     if (this.closeNotified) return;
     this.closeNotified = true;
     this.closed = true;
+    this.stopRtc('closed');
     removeMediaGatewayClient(this);
   }
+
+  // The browser offers WebRTC (it creates the DataChannels); answered over this socket. Media moves to the
+  // DataChannels once both are open, and back here if they fail or close.
+  async startRtc(offer) {
+    this.stopRtc('renegotiate');
+    const settings = webrtcSettings();
+    const support = rtcSupport(settings);
+    if (!support.available) {
+      this.rtcStatus = { state: 'unavailable', reason: support.reason };
+      this.sendJson({ type: 'webrtc-unavailable', reason: support.reason });
+      return;
+    }
+    const target = webrtcTarget(settings, this.hostHeader);
+    const rtc = { pc: null, video: null, audio: null, ready: false, videoSequence: 0, lastAudio: null, disconnectedTimer: null };
+    this.rtc = rtc;
+    this.rtcStatus = { state: 'connecting', reason: null, port: target.port, publicHost: target.host };
+    try {
+      const answer = await answerOffer({
+        offer,
+        port: target.port,
+        publicHost: target.host,
+        publicPort: target.publicPort,
+        onChannel: (channel) => {
+          const label = channel.getLabel();
+          if (this.rtc !== rtc || (label !== 'video' && label !== 'audio')) { try { channel.close(); } catch { /* closed */ } return; }
+          rtc[label] = channel;
+          channel.onOpen(() => this.rtcChannelOpen(rtc));
+          channel.onClosed(() => { if (this.rtc === rtc) this.stopRtc('channel-closed'); });
+          channel.onError(() => { if (this.rtc === rtc) this.stopRtc('channel-error'); });
+          if (channel.isOpen()) this.rtcChannelOpen(rtc);
+        },
+        onState: (state) => {
+          if (this.rtc !== rtc) return;
+          clearTimeout(rtc.disconnectedTimer);
+          if (state === 'failed' || state === 'closed') this.stopRtc(state);
+          // ICE may recover from "disconnected" (a Wi-Fi blip); media falls back after a few seconds.
+          else if (state === 'disconnected') rtc.disconnectedTimer = setTimeout(() => { if (this.rtc === rtc) this.stopRtc('disconnected'); }, 3000);
+        },
+      });
+      if (this.rtc !== rtc || this.closed) { try { answer.pc.close(); } catch { /* closed */ } return; }
+      rtc.pc = answer.pc;
+      this.sendJson({ type: 'webrtc-answer', sdp: answer.sdp });
+    } catch (error) {
+      if (this.rtc === rtc) this.rtc = null;
+      this.rtcStatus = { state: 'failed', reason: 'answer-failed', detail: safeError(error) };
+      this.sendJson({ type: 'webrtc-unavailable', reason: 'answer-failed' });
+    }
+  }
+
+  rtcChannelOpen(rtc) {
+    if (this.rtc !== rtc || rtc.ready || !rtc.video?.isOpen() || !rtc.audio?.isOpen()) return;
+    rtc.ready = true;
+    if (this.group) rtcGroups.add(this.group);
+    this.rtcStatus = { ...this.rtcStatus, state: 'active' };
+    this.flushMedia();
+    // Start the DataChannel path on a keyframe.
+    this.skipToKeyframe = true;
+    if (activeSession === this.session) requestIdrFrame(this.session);
+    this.sendJson({ type: 'webrtc-active' });
+    LOG.info('stream', 'webrtc', `浏览器媒体改走 WebRTC（UDP 端口 ${this.rtcStatus.port}）`);
+  }
+
+  sendRtc(envelope) {
+    const rtc = this.rtc;
+    try {
+      if (envelope[5] === MEDIA_STREAM_IDS.audio) {
+        // Each message also carries the previous packet: a lost message costs nothing when the next one
+        // arrives (the browser's audio pipeline drops the duplicates). ~100 kbps of audio becomes ~200.
+        rtc.audio.sendMessageBinary(rtc.lastAudio ? Buffer.concat([rtc.lastAudio, envelope]) : envelope);
+        rtc.lastAudio = envelope;
+      } else {
+        rtc.videoSequence = (rtc.videoSequence + 1) >>> 0;
+        for (const message of fragmentFrame(rtc.videoSequence, envelope)) rtc.video.sendMessageBinary(message);
+      }
+      this.sentBytes += envelope.length;
+      return true;
+    } catch {
+      this.stopRtc('send-failed');
+      return false;
+    }
+  }
+
+  stopRtc(reason) {
+    const rtc = this.rtc;
+    if (!rtc) return;
+    this.rtc = null;
+    clearTimeout(rtc.disconnectedTimer);
+    if (this.group) rtcGroups.delete(this.group);
+    for (const item of [rtc.video, rtc.audio, rtc.pc]) { try { item?.close(); } catch { /* closed */ } }
+    this.rtcStatus = { ...(this.rtcStatus || {}), state: 'closed', reason };
+    if (rtc.ready) LOG.info('stream', 'webrtc-closed', `WebRTC 已断开（${reason}），浏览器媒体改回 WebSocket`);
+    if (this.closed || reason === 'renegotiate') return;
+    this.sendJson({ type: 'webrtc-closed', reason });
+    // Back on the WebSocket from the next keyframe.
+    if (rtc.ready) {
+      this.skipToKeyframe = true;
+      if (activeSession === this.session) requestIdrFrame(this.session);
+    }
+  }
+}
+
+// UDP port and the address browsers should reach it at: settings, else the first entrypoint's port number
+// and the host name the browser used for the page (resolved to IPs by webrtc.mjs).
+function webrtcSettings() {
+  return netConfig.webrtc || { enabled: true, port: null, publicAddress: null };
+}
+
+function webrtcTarget(settings, hostHeader) {
+  const port = settings.port || netConfig.entrypoints[0]?.port || DEFAULT_ENTRY_PORT;
+  const configured = settings.publicAddress ? parseHost(settings.publicAddress) : null;
+  const fromPage = parseHost(hostHeader || '');
+  return { port, host: configured?.name || fromPage.name || null, publicPort: configured?.port || port };
 }
 
 // Once a second: what only the bridge can see (ENet RTT to the host, UDP receive rate, packets dropped for backpressure).
@@ -1868,21 +2136,55 @@ function sendMediaStats() {
   const session = activeSession;
   const media = session?.transport?.media || {};
   const control = sessionRuntime?.control;
-  if (session) evaluateAbr(session);
+  if (session) {
+    sampleRates(session, sessionRuntime);
+    evaluateAbr(session);
+  }
+  const abr = session?.abr;
+  const rates = session?.rates || {};
+  // An audio-only socket's rate counts towards its browser's video socket.
+  const audioKbpsByGroup = new Map();
   for (const client of mediaGatewayClients) {
-    if (client.session !== session) continue;
+    if (client.session === session && !client.wantsVideo && client.group) audioKbpsByGroup.set(client.group, (audioKbpsByGroup.get(client.group) || 0) + (client.sentKbps || 0));
+  }
+  for (const client of mediaGatewayClients) {
+    if (client.session !== session || !client.wantsVideo) continue;
     client.sendJson({
+      // The two legs, each with what it carries and its own limit (see the adaptive bitrate notes).
+      hostLeg: session ? {
+        kbps: rates.videoKbps != null ? rates.videoKbps + (rates.audioKbps || 0) : null,
+        videoKbps: rates.videoKbps ?? null,
+        audioKbps: rates.audioKbps ?? null,
+        encoderKbps: abr?.encoderKbps ?? session.bitrateKbps ?? null,
+        lossPercent: session.hostLeg?.lossPercent ?? null,
+        lostPackets: media.video?.lostPackets ?? 0,
+        unrecoveredFrames: sessionRuntime?.frameAssembler?.stats.lostFrames ?? 0,
+        recoveredShards: sessionRuntime?.frameAssembler?.stats.recoveredShards ?? null,
+        limitKbps: abr?.mode === 'auto' ? Math.round(abr.host.kbps) : null,
+        state: abr?.mode === 'auto' ? abr.host.state : null,
+      } : null,
+      browserLeg: {
+        sentKbps: client.sentKbps != null ? client.sentKbps + (audioKbpsByGroup.get(client.group) || 0) : null,
+        forwardedKbps: rates.forwardedKbps ?? null,
+        limitKbps: abr?.mode === 'auto' ? Math.round(abr.link.kbps) : null,
+        state: abr?.mode === 'auto' ? abr.link.state : null,
+        queueDelayMs: client.feedback?.queueDelayMs ?? null,
+        backlogMs: abr?.targetKbps ? Math.round((client.mediaBacklogBytes() * 8) / abr.targetKbps) : null,
+      },
       type: 'stats',
       at: Date.now(),
       hostRttMs: control?.connected ? control.rtt : null,
       hostRttVarianceMs: control?.connected ? control.rttVariance : null,
-      videoKbps: media.video?.bitrateKbps ?? null,
-      audioKbps: media.audio?.bitrateKbps ?? null,
+      videoKbps: rates.videoKbps ?? null,
+      audioKbps: rates.audioKbps ?? null,
       videoPackets: media.video?.packets ?? 0,
       droppedPackets: client.droppedPackets,
       draining: Boolean(client.draining),
       drainEpisodes: client.drainEpisodes || 0,
-      queuedBytes: client.socket.writableLength,
+      queuedBytes: client.mediaBacklogBytes(),
+      // 'webrtc' once both DataChannels are open, else 'websocket'; webrtc: why not (when it isn't).
+      transport: client.rtc?.ready ? 'webrtc' : 'websocket',
+      webrtc: client.rtcStatus,
       width: session?.width ?? null,
       height: session?.height ?? null,
       fps: session?.fps ?? null,
@@ -1890,10 +2192,13 @@ function sendMediaStats() {
       abr: session?.abr ? {
         mode: session.abr.mode, targetKbps: session.abr.targetKbps, capKbps: session.abr.capKbps, state: session.abr.state,
         measuredKbps: session.abr.measuredKbps, encoderKbps: session.abr.encoderKbps, encoderScale: Math.round(session.abr.encoderScale * 100) / 100,
-        method: session.abr.method, queueDelayMs: session.abr.queueDelayMs, backlogMs: session.abr.backlogMs, changes: session.abr.changes,
+        method: session.abr.method, queueDelayMs: session.abr.queueDelayMs, backlogMs: session.abr.backlogMs, changes: session.abr.changes, limitedBy: session.abr.limitedBy,
       } : null,
       reconnects: session?.reconnects ?? 0,
       videoCodec: session?.videoCodec ?? null,
+      // What the host's clipboard sync accepts right now ({ text, image }), null before RTSP.
+      clipboard: session?.clipboard ?? null,
+      codecNegotiation: session?.codecNegotiation ?? null,
       frameTransport: Boolean(client.wantsFrames),
       fecPercent: session?.fecPercent ?? null,
       audioPacketMs: session?.audioPacketDurationMs ?? null,
@@ -1948,10 +2253,12 @@ function acceptMediaGateway(request, socket, head) {
   const accept = crypto.createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: ${MEDIA_GATEWAY_PROTOCOL}\r\n\r\n`);
   const client = new MediaGatewayClient(socket, activeSession);
+  // The address the browser used for the page (through a trusted proxy: the one it forwarded).
+  client.hostHeader = auth.effectiveHost(request) || '';
   mediaGatewayClients.add(client);
   mediaStatsTimer ||= setInterval(sendMediaStats, MEDIA_STATS_INTERVAL_MS);
   updateMediaGatewayState(activeSession, 'connected', { connectedAt: activeSession.transport.media.gateway?.connectedAt || new Date().toISOString(), lastError: null });
-  client.sendJson({ type: 'media-ready', protocol: MEDIA_GATEWAY_PROTOCOL, sessionId: activeSession.id });
+  client.sendJson({ type: 'media-ready', protocol: MEDIA_GATEWAY_PROTOCOL, sessionId: activeSession.id, webrtc: rtcSupport(webrtcSettings()) });
   if (head?.length) client.handleData(head);
 }
 
@@ -2156,6 +2463,12 @@ function updateMediaState(session, runtime, streamName, packet, rinfo) {
   media.firstPacketAt ||= new Date().toISOString();
   if (!media.payloadTypes.includes(rtp.payloadType) && media.payloadTypes.length < 16) media.payloadTypes.push(rtp.payloadType);
   if (!media.source || media.source.port !== rinfo.port || media.source.address !== rinfo.address) media.source = { address: rinfo.address, port: rinfo.port };
+  if (media.lastSequence != null) {
+    const gap = (rtp.sequenceNumber - media.lastSequence - 1 + 0x10000) & 0xffff;
+    // Small forward gaps are loss; anything else is reordering or a stream restart.
+    if (gap > 0 && gap < 1000) media.lostPackets += gap;
+  }
+  if (media.lastSequence == null || ((rtp.sequenceNumber - media.lastSequence + 0x10000) & 0xffff) < 0x8000) media.lastSequence = rtp.sequenceNumber;
   media.rtp = rtp;
   // Bitrate over a ~1 s window (a per-packet rate is just noise).
   const rate = runtime.mediaLastAt[streamName] || (runtime.mediaLastAt[streamName] = { at: nowMs, bytes: media.bytes - packet.length });
@@ -2373,6 +2686,7 @@ async function startControlStream(session, runtime) {
   });
   control.on('rumble', (rumble) => broadcastGatewayJson(session, { type: 'rumble', ...rumble }));
   control.on('hdr', (hdr) => broadcastGatewayJson(session, { type: 'hdr', ...hdr }));
+  control.on('clipboard', (frame) => { void receiveHostClipboard(session, frame); });
   try {
     await control.start();
   } catch (error) {
@@ -2446,6 +2760,8 @@ async function negotiateSessionTransport(session, host, { rethrow = false } = {}
     session.transport.rtsp.describeStatusCode = describeResponse.statusCode;
     session.transport.rtsp.contentType = describeResponse.headers['content-type'] || null;
     session.transport.rtsp.sdpBytes = describeResponse.body.length;
+    // Clipboard sync is offered only when Sunshine has it on and its desktop agent runs (clipboard.mjs).
+    session.clipboard = Clipboard.featureFlagsFromSdp(describeResponse.body);
     emitSessionEvent('rtsp-describe', { statusCode: describeResponse.statusCode, sdpBytes: describeResponse.body.length });
 
     await setupRtspStream(runtime.rtsp, session, runtime, 'audio', 'streamid=audio/0/0', DEFAULT_AUDIO_PORT);
@@ -2543,6 +2859,147 @@ async function pingHost(host) {
       error: rtspProbe.error,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Diagnosis (Network page): every leg the stream uses, as a list of checks
+//   { id, group: 'host' | 'stream' | 'bridge', status: 'ok' | 'warn' | 'fail' | 'skip' | 'info', detail, elapsedMs }
+// plus pingHost()'s fields for the summary cards. The browser adds its own checks (RTT, a real WebRTC
+// connection via /api/bridge/webrtc-test, decoders, clipboard).
+// ---------------------------------------------------------------------------
+const WEB_UI_PORT = 47990;
+
+// RTSP answers OPTIONS without a session: proof Sunshine's RTSP server is up, not just the port.
+function rtspOptionsProbe(host, port, timeout = 2500) {
+  return new Promise((resolve) => {
+    const started = performance.now();
+    const socket = net.createConnection({ host: host.address, port });
+    let connected = false;
+    let reply = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ ...result, connected, elapsedMs: Math.round(performance.now() - started) });
+    };
+    socket.setTimeout(timeout, () => finish({ ok: false, error: connected ? 'no-reply' : 'timeout' }));
+    socket.once('connect', () => {
+      connected = true;
+      socket.write(`OPTIONS rtsp://${host.address}:${port} RTSP/1.0\r\nCSeq: 1\r\nX-GS-ClientVersion: 14\r\n\r\n`);
+    });
+    socket.on('data', (chunk) => {
+      reply += chunk.toString('latin1');
+      const status = reply.match(/^RTSP\/1\.0 (\d{3})/);
+      if (status) finish({ ok: true, statusCode: Number(status[1]) });
+    });
+    socket.once('end', () => finish({ ok: false, error: connected ? 'no-reply' : 'closed' }));
+    socket.once('error', (error) => finish({ ok: false, error: safeError(error) }));
+  });
+}
+
+async function diagnoseHost(host) {
+  const checks = [];
+  const add = (id, group, status, detail, elapsedMs = null) => checks.push({ id, group, status, detail, elapsedMs });
+  const timed = async (work) => { const started = performance.now(); const value = await work(); return [value, Math.round(performance.now() - started)]; };
+
+  // Address
+  if (!net.isIP(host.address)) {
+    try {
+      const [addresses, ms] = await timed(() => dns.promises.lookup(host.address, { all: true }));
+      add('host.resolve', 'host', 'ok', `${host.address} → ${addresses.map((entry) => entry.address).join(', ')}`, ms);
+    } catch (error) {
+      add('host.resolve', 'host', 'fail', `无法解析 ${host.address}：${safeError(error)}`);
+      return { checks, ...(await pingHost(host)) };
+    }
+  }
+  // Ports and latency (pingHost: 3 TCP connects to the control port + RTSP)
+  const ping = await pingHost(host);
+  const httpPort = host.httpPort || DEFAULT_HTTP_PORT;
+  const httpsPort = host.httpsPort || DEFAULT_HTTPS_PORT;
+  const otherPort = ping.controlProtocol === 'https' ? httpPort : httpsPort;
+  const other = await tcpProbe(host, otherPort);
+  const portCheck = (protocol, port, probe) => add(`host.${protocol}`, 'host', probe.ok ? 'ok' : 'fail', probe.ok ? `TCP ${port} 可连接` : `TCP ${port} 连不上（${probe.error || '无响应'}）：主机没开机、Sunshine 没运行，或防火墙拦截`, probe.elapsedMs);
+  const controlProbe = ping.probes.find((probe) => probe.ok) || ping.probes[0];
+  if (ping.controlProtocol === 'https') { portCheck('http', httpPort, other); portCheck('https', httpsPort, controlProbe); }
+  else { portCheck('http', httpPort, controlProbe); portCheck('https', httpsPort, other); }
+  if (ping.latency != null) add('host.latency', 'host', ping.loss > 0 ? 'warn' : 'ok', `TCP 连接 ${ping.latency} ms，抖动 ${ping.jitter ?? 0} ms，失败 ${ping.loss}%`);
+
+  // Sunshine itself
+  let info = null;
+  try {
+    const [value, ms] = await timed(() => requestServerInfo(host, { timeout: 4000 }));
+    info = value;
+    const codecs = ['H.264', info.serverCodecModeSupport & SCM_HEVC && 'HEVC', info.serverCodecModeSupport & SCM_AV1_MAIN8 && 'AV1'].filter(Boolean).join(' / ');
+    const busy = info.currentGame ? `正在运行应用 ${(host.apps || []).find((app) => app.id === info.currentGame)?.name || info.currentGame}` : '空闲';
+    add('host.serverinfo', 'host', 'ok', `Sunshine ${info.sunshineVersion || info.appVersion || ''} · ${busy} · 编码 ${codecs}`.replace(/\s+·/, ' ·'), ms);
+  } catch (error) {
+    add('host.serverinfo', 'host', 'fail', error?.errorCode === 'TLS_CERTIFICATE_MISMATCH' ? '主机证书和配对时保存的不一致（重装过 Sunshine？）：需要重新配对' : `读取 /serverinfo 失败：${safeError(error)}`);
+  }
+  if (!host.paired || !host.serverCertBase64) {
+    add('host.pairing', 'host', 'warn', '还没有配对：在主机列表里配对后才能串流');
+  } else if (info) {
+    try {
+      const [apps, ms] = await timed(() => requestApps(host));
+      add('host.pairing', 'host', 'ok', `配对有效（客户端证书通过验证），${apps.apps?.length ?? apps.length ?? 0} 个应用`, ms);
+    } catch (error) {
+      add('host.pairing', 'host', 'fail', `配对失效：${safeError(error)}（在 Sunshine 网页里删除过本设备？需要重新配对）`);
+    }
+  }
+  // RTSP: the stream is negotiated here
+  const rtspPort = host.rtspPort || DEFAULT_RTSP_PORT;
+  const rtsp = await rtspOptionsProbe(host, rtspPort);
+  add('host.rtsp', 'host', rtsp.ok ? 'ok' : rtsp.connected ? 'warn' : 'fail',
+    rtsp.ok ? `RTSP ${rtspPort} 应答 ${rtsp.statusCode}` : rtsp.connected ? `TCP ${rtspPort} 可连接，但 RTSP 没有应答（Sunshine 忙或版本差异；能正常串流可忽略）` : `RTSP ${rtspPort} 连不上（${rtsp.error}）：防火墙需要放行 TCP ${rtspPort}`, rtsp.elapsedMs);
+  const webUi = await tcpProbe(host, WEB_UI_PORT);
+  add('host.webui', 'host', webUi.ok ? 'ok' : 'info', webUi.ok ? `Sunshine 网页设置 https://${host.address}:${WEB_UI_PORT}` : `网页设置端口 ${WEB_UI_PORT} 连不上（只影响在别的电脑上打开 Sunshine 设置）`, webUi.elapsedMs);
+  add('host.wol', 'host', 'info', host.mac ? `已记录 MAC ${host.mac}，主机睡眠时可网络唤醒` : '没有记录 MAC 地址：主机睡眠后不能从这里唤醒（在主机管理里填写）');
+
+  // Stream (UDP): only measurable while it runs
+  const session = activeSession?.hostId === host.id ? activeSession : null;
+  if (!session) {
+    add('stream.udp', 'stream', 'skip', `视频 / 音频 / 控制走 UDP（${DEFAULT_VIDEO_PORT}、${DEFAULT_AUDIO_PORT}、${DEFAULT_CONTROL_PORT}），开始串流后再运行诊断即可检测`);
+  } else {
+    const media = session.transport.media;
+    const video = media.video || {};
+    const lossPercent = (video.packets || 0) + (video.lostPackets || 0) ? Math.round(((video.lostPackets || 0) * 1000) / ((video.packets || 0) + (video.lostPackets || 0))) / 10 : 0;
+    add('stream.video', 'stream', !video.packets ? 'fail' : lossPercent > 2 ? 'warn' : 'ok', video.packets ? `已收到 ${video.packets} 个视频包，${session.rates?.videoKbps != null ? `${(session.rates.videoKbps / 1000).toFixed(1)} Mbps，` : ''}丢包 ${lossPercent}%（FEC 可修复少量丢包）` : `没有收到视频（UDP ${DEFAULT_VIDEO_PORT}）：防火墙或 NAT 拦截了 Sunshine 发来的 UDP`);
+    const audio = media.audio || {};
+    add('stream.audio', 'stream', audio.packets ? 'ok' : 'fail', audio.packets ? `已收到 ${audio.packets} 个音频包` : `没有收到音频（UDP ${DEFAULT_AUDIO_PORT}）`);
+    const control = sessionRuntime?.control;
+    add('stream.control', 'stream', control?.connected ? 'ok' : 'fail', control?.connected ? `控制通道已连接，RTT ${Math.round(control.rtt)} ms` : `控制通道没有连上（UDP ${DEFAULT_CONTROL_PORT}）`);
+    add('stream.clipboard', 'stream', session.clipboard?.text || session.clipboard?.image ? 'ok' : 'info', session.clipboard?.text || session.clipboard?.image ? `主机接受剪贴板同步：${[session.clipboard.text && '文本', session.clipboard.image && '图片'].filter(Boolean).join('、')}` : '主机没有开启剪贴板同步（Sunshine 设置里打开，并保持 Sunshine 桌面程序运行）');
+  }
+
+  // The bridge
+  const listening = [...listeners.values()];
+  const failedEntries = listening.filter((item) => item.state !== 'listening');
+  add('bridge.entrypoints', 'bridge', failedEntries.length ? 'warn' : 'ok', failedEntries.length ? `入口未启动：${failedEntries.map((item) => `${entryLabel(item.entry)}（${item.error || item.state}）`).join('；')}` : `${listening.length} 个入口在监听：${listening.map((item) => entryLabel(item.entry)).join('；')}`);
+  const settings = webrtcSettings();
+  const support = rtcSupport(settings);
+  const udpPort = webrtcTarget(settings, '').port;
+  if (!support.available) {
+    const deps = `${process.platform === 'win32' ? 'start.bat' : './start.sh'} deps`;
+    let detail = 'WebRTC 已在访问设置中关闭，媒体走 WebSocket';
+    if (support.reason === 'module-missing') {
+      // Installed, but not for this platform (node_modules copied or synced from another OS), or not installed.
+      const mismatch = support.native.length && !support.native.some((name) => name.startsWith(support.platform));
+      detail = mismatch
+        ? `node-datachannel 装的是 ${support.native.join('、')} 版本，本机是 ${support.platform}：node_modules 可能是从别的系统复制或同步来的。运行 ${deps} 重新安装后重启 Sunbridge`
+        : `Sunbridge 启动时没能加载 node-datachannel（${support.detail || '未安装'}），媒体走 WebSocket。运行 ${deps} 安装后重启 Sunbridge`;
+    }
+    add('bridge.webrtc', 'bridge', 'warn', detail);
+  } else {
+    const inUse = [...mediaGatewayClients].some((client) => client.rtc);
+    const bindable = inUse ? true : await new Promise((resolve) => {
+      const socket = dgram.createSocket('udp4');
+      socket.once('error', (error) => { socket.close(); resolve(error.code === 'EADDRINUSE' ? '已被其他程序占用' : safeError(error)); });
+      socket.bind(udpPort, () => socket.close(() => resolve(true)));
+    });
+    add('bridge.webrtc', 'bridge', bindable === true ? 'ok' : 'fail', bindable === true ? `WebRTC 可用，UDP 端口 ${udpPort}${inUse ? '（正在使用）' : ''}` : `UDP 端口 ${udpPort} ${bindable}：在访问设置里换一个端口`);
+  }
+  add('bridge.runtime', 'bridge', 'info', `Sunbridge ${VERSION} · Node.js ${process.version} · ${process.platform}-${process.arch}`);
+  return { checks, ...ping };
 }
 
 function parseMac(value) {
@@ -2643,10 +3100,10 @@ async function launchHost(input) {
   const info = await requestServerInfo(host).catch(() => null);
   const resume = Boolean(info?.currentGame) && info.currentGame === Number(app.id);
   // Most efficient codec both sides can do (browser lists what it decodes, in its order of preference).
-  const hostCodecs = info?.serverCodecModeSupport || 0;
-  const hostSupports = { h264: true, hevc: Boolean(hostCodecs & SCM_HEVC), av1: Boolean(hostCodecs & SCM_AV1_MAIN8) };
-  const browserCodecs = Array.isArray(input.videoCodecs) ? input.videoCodecs.filter((codec) => codec in VIDEO_CODECS) : [];
-  const videoCodec = browserCodecs.find((codec) => hostSupports[codec]) || 'h264';
+  // /serverinfo failing here would silently mean "H.264 only": fall back to what the host reported last.
+  const hostCodecs = info?.serverCodecModeSupport ?? host.serverInfo?.serverCodecModeSupport ?? 0;
+  const videoCodec = pickVideoCodec(hostCodecs, input.videoCodecs);
+  const codecNegotiation = describeCodecNegotiation(hostCodecs, info ? 'serverinfo' : host.serverInfo ? 'cached' : 'unavailable', input, videoCodec);
   // Whole frames to the browser (no FEC parity / RTP headers): the encoder may then use the bandwidth FEC took.
   const frameTransport = input.frames === true;
   const encoderScale = frameTransport ? 100 / (100 - ASSUMED_FEC_PERCENT) : 1;
@@ -2671,11 +3128,13 @@ async function launchHost(input) {
     bitrateKbps,
     bitrateExplicit: requestedBitrate > 0,
     videoCodec,
+    hostCodecs,
+    codecNegotiation,
     frameTransport,
     // 10 ms audio packets halve the packet rate over the internet (GameStream clients do the same on slow links).
     audioPacketDurationMs: remoteClient ? 10 : 5,
     fecPercent: null,
-    abr: { mode: bitrateMode, capKbps, targetKbps, encoderKbps: bitrateKbps, encoderScale, overshootWindows: 0, measuredKbps: null, rateWindow: null, state: 'starting', method: null, changes: 0, lastChangeAt: Date.now(), goodSince: null, remoteClient },
+    abr: { mode: bitrateMode, capKbps, targetKbps, encoderKbps: bitrateKbps, encoderScale, overshootWindows: 0, measuredKbps: null, rateWindow: null, state: 'starting', method: null, changes: 0, lastChangeAt: Date.now(), remoteClient, limitedBy: null, host: createAbrSegment(capKbps), link: createAbrSegment(targetKbps) },
     launchOptions,
     resumed: resume,
     reconnects: 0,
@@ -2695,6 +3154,125 @@ async function launchHost(input) {
   emitSessionEvent('session-started', { hostId: host.id, appId: app.id, appName: app.name });
   void negotiateSessionTransport(session, host);
   return { ...session, host: hostPublic(host), raw: response.body };
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard sync (clipboard.mjs). Host -> browser: text up to CLIPBOARD_INLINE_TEXT goes in the gateway
+// message, anything else (images, large text, blobs fetched from the host) waits in a short-lived store for
+// the browser to GET it. Browser -> host: POSTed raw, sent inline or uploaded to the host as a blob.
+// ---------------------------------------------------------------------------
+const CONTROL_CLIPBOARD = 0x5508;
+const CLIPBOARD_INLINE_TEXT = 256 * 1024;
+const clipboardEcho = Clipboard.createEchoFilter();
+const clipboardStore = Clipboard.createStore();
+
+async function receiveHostClipboard(session, frame) {
+  if (activeSession !== session) return;
+  const message = Clipboard.decodeFrame(frame);
+  if (!message || clipboardEcho.isEcho(message.token)) return;
+  let mime;
+  let data = message.payload;
+  if (message.kind === Clipboard.KIND.TEXT) mime = 'text/plain';
+  else if (message.kind === Clipboard.KIND.PNG) mime = 'image/png';
+  else if (message.kind === Clipboard.KIND.REF) {
+    const ref = Clipboard.parseRef(message.payload);
+    if (!ref || ref.size > Clipboard.BLOB_MAX_BYTES) return;
+    mime = Clipboard.isTextMime(ref.mime) ? 'text/plain' : ref.mime.toLowerCase() === 'image/png' ? 'image/png' : null;
+    if (!mime) return;
+    try {
+      const result = await requestHost(hosts[session.hostId], `/api/v1/clipboard/blob/${ref.id}`, {}, { secure: true, binary: true, timeout: 30000 });
+      data = result.body;
+    } catch (error) {
+      LOG.warn('stream', 'clipboard', `下载主机剪贴板内容失败：${safeError(error)}`);
+      return;
+    }
+    if (data.length > Clipboard.BLOB_MAX_BYTES || (ref.size > 0 && data.length !== ref.size)) return;
+  } else {
+    return;
+  }
+  if (activeSession !== session) return;
+  if (mime === 'text/plain' && data.length <= CLIPBOARD_INLINE_TEXT) {
+    broadcastGatewayJson(session, { type: 'clipboard', mime, text: data.toString('utf8') });
+  } else {
+    broadcastGatewayJson(session, { type: 'clipboard', mime, id: clipboardStore.put(Buffer.from(data), mime), size: data.length });
+  }
+}
+
+async function sendClipboardToHost(session, mime, data) {
+  const control = activeControl(session);
+  if (!control) throw bridgeError('串流还没有连上主机', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
+  const kind = Clipboard.isTextMime(mime) ? Clipboard.KIND.TEXT : mime === 'image/png' ? Clipboard.KIND.PNG : 0;
+  if (!kind) throw bridgeError('只支持文本和 PNG 图片', 'CLIPBOARD_UNSUPPORTED', { statusCode: 415 });
+  if (!(kind === Clipboard.KIND.TEXT ? session.clipboard?.text : session.clipboard?.image)) {
+    throw bridgeError('主机没有开启剪贴板同步（Sunshine 设置里打开，并保持 Sunshine 桌面程序运行）', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
+  }
+  if (!data.length) return { kind: 'empty' };
+  if (data.length > Clipboard.BLOB_MAX_BYTES) throw bridgeError('剪贴板内容太大', 'CLIPBOARD_TOO_LARGE', { statusCode: 413 });
+  let frameKind = kind;
+  let payload = data;
+  if (data.length > Clipboard.INLINE_MAX_BYTES) {
+    // Too large for one control message: upload to the host, send a reference.
+    const wireMime = kind === Clipboard.KIND.TEXT ? 'text/plain;charset=utf-8' : 'image/png';
+    const result = await requestHost(hosts[session.hostId], '/api/v1/clipboard/blob', {}, { secure: true, method: 'POST', body: data, headers: { 'X-Clipboard-Mime': wireMime }, timeout: 60000 });
+    let uploaded;
+    try { uploaded = JSON.parse(result.body); } catch { uploaded = null; }
+    if (!uploaded?.id) throw bridgeError('主机没有接受剪贴板内容', 'CLIPBOARD_UPLOAD_FAILED', { statusCode: 502 });
+    frameKind = Clipboard.KIND.REF;
+    payload = Buffer.from(JSON.stringify({ type: 'ref', id: String(uploaded.id), mime: uploaded.mime || wireMime, size: Number(uploaded.size) || data.length }));
+  }
+  const { frame, token } = Clipboard.encodeFrame(frameKind, payload);
+  clipboardEcho.sent(token);
+  if (control.sendMessage(CONTROL_CLIPBOARD, frame) === false) throw bridgeError('发送到主机失败', 'CLIPBOARD_UNAVAILABLE', { statusCode: 503 });
+  return { kind: frameKind === Clipboard.KIND.REF ? 'blob' : 'inline', bytes: data.length };
+}
+
+async function readRawBody(request, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > limit) throw bridgeError('剪贴板内容太大', 'CLIPBOARD_TOO_LARGE', { statusCode: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// First codec in the browser's order (most efficient it decodes in hardware first) that the host encodes.
+function pickVideoCodec(hostCodecs, browserCodecs) {
+  const hostSupports = { h264: true, hevc: Boolean(hostCodecs & SCM_HEVC), av1: Boolean(hostCodecs & SCM_AV1_MAIN8) };
+  const list = Array.isArray(browserCodecs) ? browserCodecs.filter((codec) => codec in VIDEO_CODECS) : [];
+  return list.find((codec) => hostSupports[codec]) || 'h264';
+}
+
+// The browser found it can't decode the stream's codec in hardware (or keeps falling behind in software):
+// have the host encode the next codec on its list instead. The host's GPU encoder is the only encoder in the
+// path; the bridge never re-encodes, which would add latency and a generation of quality loss.
+// What each side offered and why this codec won, for the stream log and the stats panel.
+function describeCodecNegotiation(hostCodecs, hostSource, input, chosen) {
+  const host = hostCodecList(hostCodecs);
+  const browser = Array.isArray(input.videoCodecs) ? input.videoCodecs.filter((codec) => codec in VIDEO_CODECS) : [];
+  const probe = input.codecProbe && typeof input.codecProbe === 'object' ? input.codecProbe : null;
+  // Per codec as the browser probed it: hw = hardware decoder, sw = software only, no = not decodable.
+  const decode = probe ? Object.fromEntries(['av1', 'hevc', 'h264'].map((codec) => [codec, probe[codec + 'Hw'] === true ? 'hw' : probe[codec] === true ? 'sw' : 'no'])) : null;
+  return { chosen, browser, host, hostFlags: hostCodecs, hostSource, decode, choice: typeof input.codecChoice === 'string' ? input.codecChoice.slice(0, 8) : null, probeSize: typeof probe?.key === 'string' ? probe.key.slice(0, 32) : null };
+}
+
+function codecNegotiationText(negotiation) {
+  if (!negotiation) return '';
+  const decode = negotiation.decode ? Object.entries(negotiation.decode).map(([codec, mode]) => `${codec}:${mode}`).join(' ') : '未知';
+  return `编码 ${negotiation.chosen}（浏览器解码 ${decode}${negotiation.probeSize ? ` @${negotiation.probeSize}` : ''}，设置 ${negotiation.choice || 'auto'}，浏览器候选 ${negotiation.browser.join('/') || '无'}；主机支持 ${negotiation.host.join('/')}，ServerCodecModeSupport=0x${negotiation.hostFlags.toString(16)}，来源 ${negotiation.hostSource}）`;
+}
+
+function switchVideoCodec(session, browserCodecs) {
+  if (activeSession !== session || session.reconnect) return;
+  const next = pickVideoCodec(session.hostCodecs || 0, browserCodecs);
+  if (next === session.videoCodec) return;
+  const from = session.videoCodec;
+  session.videoCodec = next;
+  if (session.codecNegotiation) session.codecNegotiation = { ...session.codecNegotiation, chosen: next, switchedFrom: from };
+  LOG.info('stream', 'codec-switch', `浏览器无法流畅解码 ${from}，主机改用 ${next} 编码`);
+  emitSessionEvent('session-codec', { from, to: next });
+  void reconnectSession(session, 'codec');
 }
 
 function sunshineStreamParams(session, riKey, riKeyId) {
@@ -2752,7 +3330,7 @@ function reconnectSession(session, reason, size = null) {
         session.reconnect = null;
         session.lastReconnectAt = new Date().toISOString();
         // A new RTP stream starts (new frame numbers, new keyframe): browsers rebuild their decoders.
-        broadcastGatewayJson(session, { type: 'stream-reset', reason, width: session.width, height: session.height });
+        broadcastGatewayJson(session, { type: 'stream-reset', reason, width: session.width, height: session.height, videoCodec: session.videoCodec });
         emitSessionEvent('session-reconnected', { reason, attempts: state.attempt });
         return true;
       } catch (error) {
@@ -2800,6 +3378,8 @@ function resizeSession(input = {}) {
     if (session.abr) {
       session.abr.capKbps = capKbps;
       session.abr.targetKbps = Math.min(session.abr.mode === 'auto' ? session.abr.targetKbps : capKbps, capKbps);
+      // A larger picture raises the cap: the segments probe up towards it from where they are.
+      for (const segment of [session.abr.host, session.abr.link]) if (segment) segment.kbps = Math.min(segment.kbps, capKbps);
       bitrateKbps = Math.max(500, Math.round((session.abr.targetKbps * session.abr.encoderScale) / 100) * 100);
       session.abr.encoderKbps = bitrateKbps;
     } else {
@@ -2977,7 +3557,8 @@ async function handleApi(request, response, pathname) {
     response.end();
     return;
   }
-  const body = request.method === 'POST' ? await readBody(request) : {};
+  // The clipboard upload is raw bytes, read after the login check below.
+  const body = request.method === 'POST' && pathname !== '/api/bridge/clipboard' ? await readBody(request) : {};
   if (pathname === '/api/auth/status' && request.method === 'GET') {
     jsonResponse(response, 200, { ok: true, ...auth.status(request) });
     return;
@@ -3124,6 +3705,25 @@ async function handleApi(request, response, pathname) {
     jsonResponse(response, 200, { ok: true, ...result });
     return;
   }
+  if (pathname === '/api/bridge/diagnose' && request.method === 'POST') {
+    jsonResponse(response, 200, { ok: true, ...(await diagnoseHost(findHost(body))) });
+    return;
+  }
+  // A real WebRTC connection from this browser to the bridge's UDP port: answers the offer, echoes whatever
+  // arrives on the "probe" channel, and closes after 20 s.
+  if (pathname === '/api/bridge/webrtc-test' && request.method === 'POST') {
+    const settings = webrtcSettings();
+    const support = rtcSupport(settings);
+    if (!support.available) { jsonResponse(response, 200, { ok: false, errorCode: 'WEBRTC_UNAVAILABLE', reason: support.reason }); return; }
+    const target = webrtcTarget(settings, auth.effectiveHost(request));
+    const answer = await answerOffer({
+      offer: String(body.sdp || ''), port: target.port, publicHost: target.host, publicPort: target.publicPort,
+      onChannel: (channel) => channel.onMessage((message) => { try { channel.sendMessage(String(message)); } catch { /* closed */ } }),
+    });
+    setTimeout(() => { try { answer.pc.close(); } catch { /* closed */ } }, 20000).unref?.();
+    jsonResponse(response, 200, { ok: true, sdp: answer.sdp, target: { host: target.host, port: target.publicPort } });
+    return;
+  }
   if (pathname === '/api/bridge/wake' && request.method === 'POST') {
     const host = findHost(body);
     const mac = body.mac || host.mac;
@@ -3152,7 +3752,7 @@ async function handleApi(request, response, pathname) {
     if (!requireTwoFactor(request, response, 'stream')) return;
     const session = await launchHost({ ...body, clientAddress: auth.clientIp(request) });
     auth.grantStream(request, session?.id);
-    LOG.info('stream', 'launch', `开始串流：${session?.appName || ''} · ${session?.hostName || ''}`, requestFields(request));
+    LOG.info('stream', 'launch', `开始串流：${session?.appName || ''} · ${session?.hostName || ''} · ${codecNegotiationText(session?.codecNegotiation)}`, requestFields(request));
     jsonResponse(response, 200, { ok: true, session });
     return;
   }
@@ -3168,6 +3768,20 @@ async function handleApi(request, response, pathname) {
     jsonResponse(response, 200, { ok: true });
     return;
   }
+  if (pathname === '/api/bridge/clipboard' && request.method === 'POST') {
+    if (!activeSession) throw bridgeError('没有正在进行的串流', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
+    const mime = String(request.headers['x-clipboard-mime'] || '').toLowerCase().split(';')[0].trim();
+    const data = await readRawBody(request, Clipboard.BLOB_MAX_BYTES);
+    jsonResponse(response, 200, { ok: true, ...(await sendClipboardToHost(activeSession, mime === 'text/plain' ? 'text/plain;charset=utf-8' : mime, data)) });
+    return;
+  }
+  if (pathname.startsWith('/api/bridge/clipboard/') && request.method === 'GET') {
+    const item = clipboardStore.get(pathname.slice('/api/bridge/clipboard/'.length));
+    if (!item) { jsonResponse(response, 404, { ok: false, errorCode: 'CLIPBOARD_EXPIRED', error: '剪贴板内容已过期' }); return; }
+    response.writeHead(200, { 'Content-Type': item.mime === 'text/plain' ? 'text/plain; charset=utf-8' : item.mime, 'Content-Length': item.data.length, 'Cache-Control': 'no-store' });
+    response.end(item.data);
+    return;
+  }
   if (pathname === '/api/bridge/stop' && request.method === 'POST') {
     const result = await stopSession();
     if (result?.session) LOG.info('stream', 'stop', `结束串流：${result.session.appName || ''} · ${result.session.hostName || ''}`, requestFields(request));
@@ -3179,7 +3793,7 @@ async function handleApi(request, response, pathname) {
 
 // Only the web client itself is served. Everything else in this directory (data with the pairing
 // key, password hashes and TLS keys, certs/, scripts, tests, backups, server sources) must never be readable.
-const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/favicon.ico']);
+const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/favicon.ico']);
 const isServableStatic = (requestedPath) => STATIC_FILES.has(requestedPath) || /^\/assets\/[\w.-]+\.(png|jpe?g|svg|webp|ico)$/i.test(requestedPath);
 
 function serveStatic(request, response, pathname) {
@@ -3244,6 +3858,12 @@ function networkSnapshot(request) {
     },
     pending: pendingNetworkChange ? { expiresAt: pendingNetworkChange.expiresAt } : null,
     machine: { hostname: os.hostname(), addresses: lanAddresses() },
+    // WebRTC settings, whether it can run, and where this browser would be told to send UDP.
+    webrtc: (() => {
+      const settings = webrtcSettings();
+      const target = webrtcTarget(settings, auth.effectiveHost(request));
+      return { settings, support: rtcSupport(settings), target: { host: target.host, port: target.publicPort, udpPort: target.port } };
+    })(),
   };
 }
 
@@ -3354,6 +3974,23 @@ async function handleSettingsApi(request, response, pathname, body) {
         if (failed.length) revertNetworkChange('failed');
       });
     }, 400);
+    return;
+  }
+  if (pathname === '/api/settings/webrtc') {
+    const errors = [];
+    const webrtc = validateWebrtc(body.webrtc, (message) => errors.push(message));
+    if (errors.length) { jsonResponse(response, 400, { ok: false, errorCode: 'NETWORK_INVALID', error: errors.join('；'), errors }); return; }
+    netConfig = { ...netConfig, webrtc };
+    saveNetConfig(DATA_DIR, netConfig);
+    LOG.info('settings', 'webrtc-changed', `WebRTC 设置已修改：${webrtc.enabled ? '开启' : '关闭'}，UDP 端口 ${webrtc.port || '同入口端口'}，公网地址 ${webrtc.publicAddress || '自动'}`, fields);
+    jsonResponse(response, 200, { ok: true, ...networkSnapshot(request) });
+    return;
+  }
+  if (pathname === '/api/settings/restart') {
+    LOG.info('system', 'restart-requested', '从网页重启 Sunbridge', fields);
+    jsonResponse(response, 200, { ok: true });
+    // After the response is out.
+    setTimeout(() => shutdown({ restart: true }), 300);
     return;
   }
   if (pathname === '/api/settings/certificates/upload') {
@@ -3590,19 +4227,42 @@ if (setupCode) {
   console.log(`\n  首次使用：在浏览器打开上面的地址，用设置码创建账户。`);
   console.log(`  设置码：${setupCode}\n`);
 }
+{
+  const webrtc = rtcSupport(webrtcSettings());
+  if (webrtc.reason === 'module-missing') console.log('  WebRTC 不可用：缺少 node-datachannel，画面走 WebSocket。用 start.sh / start.bat 启动会自动安装，或在 app 目录执行 npm install --omit=dev。');
+  else if (webrtc.available) console.log(`  WebRTC：UDP 端口 ${webrtcTarget(webrtcSettings(), '').port}（外网访问需要放通这个 UDP 端口，连不上时自动改用 WebSocket）`);
+}
 console.log(`Client ID: ${identity.uniqueId}`);
 console.log(`日志：${LOG.file}`);
 
+// Restart from the web page. Under start.sh / start.bat (scripts/manage.mjs sets SUNBRIDGE_SUPERVISOR) the
+// bridge exits with RESTART_EXIT_CODE and the launcher starts it again; run directly (node server.mjs), it
+// starts its replacement itself once the ports are free. The stream on the host keeps running: browsers
+// reconnect and resume it.
+const RESTART_EXIT_CODE = 75;
 let shuttingDown = false;
-function shutdown() {
+function shutdown({ restart = false } = {}) {
   if (shuttingDown) return;
   shuttingDown = true;
-  closeMediaGatewayClients(activeSession, 1001, 'bridge shutting down');
+  closeMediaGatewayClients(activeSession, 1001, restart ? 'bridge restarting' : 'bridge shutting down');
   closeSessionEventStreams();
-  LOG.info('system', 'stopped', 'Sunbridge 已停止');
-  void Promise.all([...listeners.values()].map(closeListener)).then(() => process.exit(0));
-  setTimeout(() => process.exit(0), 2000).unref?.();
+  LOG.info('system', restart ? 'restarting' : 'stopped', restart ? 'Sunbridge 正在重启' : 'Sunbridge 已停止');
+  let exited = false;
+  const exit = () => {
+    if (exited) return;
+    exited = true;
+    if (!restart) process.exit(0);
+    if (process.env.SUNBRIDGE_SUPERVISOR === 'manage') process.exit(RESTART_EXIT_CODE);
+    try {
+      spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], { cwd: process.cwd(), env: process.env, stdio: 'inherit' });
+    } catch (error) {
+      console.error(`无法重新启动 Sunbridge：${safeError(error)}`);
+    }
+    process.exit(0);
+  };
+  void Promise.all([...listeners.values()].map(closeListener)).then(exit);
+  setTimeout(exit, 2000).unref?.();
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown());
+process.on('SIGTERM', () => shutdown());

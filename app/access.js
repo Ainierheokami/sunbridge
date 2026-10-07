@@ -315,12 +315,78 @@
       output);
   }
 
+  // ----- WebRTC --------------------------------------------------------------------------------------
+  function webrtcCard() {
+    const info = state.network.webrtc;
+    if (!info) return null;
+    const enabled = h('input', { type: 'checkbox', checked: info.settings.enabled });
+    const port = h('input', { type: 'number', min: '1', max: '65535', value: info.settings.port || '', placeholder: String(info.target.udpPort) });
+    const address = h('input', { value: info.settings.publicAddress || '', placeholder: t('access.webrtcAddressAuto', { value: info.target.host ? `${info.target.host}:${info.target.port}` : '—' }), spellcheck: 'false' });
+    const output = h('p', { class: 'security-message', role: 'status' });
+    const status = info.support.available
+      ? t('access.webrtcReady', { host: info.target.host || '—', port: info.target.port, udp: info.target.udpPort })
+      : t('stats.webrtcReason.' + info.support.reason);
+    const save = async () => {
+      const password = await askPassword(t('access.webrtcTitle'), t('access.webrtcSaveCopy'));
+      if (password == null) return;
+      try {
+        const result = await call('/api/settings/webrtc', { password, webrtc: { enabled: enabled.checked, port: port.value ? Number(port.value) : null, publicAddress: address.value.trim() || null } });
+        state.network = { ...state.network, ...result };
+        render();
+      } catch (error) { output.textContent = error.message; }
+    };
+    return card(t('access.webrtcTitle'), t('access.webrtcCaption'),
+      h('p', { class: 'host-hint', text: t('access.webrtcHint') }),
+      h('p', { class: info.support.available ? 'host-hint' : 'security-warning', text: status }),
+      h('label', { class: 'host-field access-checkbox' }, enabled, h('span', { text: t('access.webrtcEnabled') })),
+      h('div', { class: 'entry-grid' },
+        h('label', { class: 'host-field' }, h('span', { text: t('access.webrtcPort') }), h('div', { class: 'input-shell' }, port)),
+        h('label', { class: 'host-field' }, h('span', { text: t('access.webrtcAddress') }), h('div', { class: 'input-shell' }, address))),
+      h('div', { class: 'dialog-actions' }, h('button', { class: 'primary-button', type: 'button', text: t('access.save'), onclick: () => void save() })),
+      output);
+  }
+
+  // ----- restart -------------------------------------------------------------------------------------
+  // Restarts the bridge process (the stream on the host keeps running and resumes), then reloads this page
+  // once the bridge answers again.
+  async function restartBridge(output) {
+    const password = await askPassword(t('access.restartTitle'), t('access.restartCopy'));
+    if (password == null) return;
+    output.textContent = '';
+    try {
+      await call('/api/settings/restart', { password });
+    } catch (error) {
+      output.textContent = error.message;
+      return;
+    }
+    output.textContent = t('access.restarting');
+    const startedAt = Date.now();
+    const poll = async () => {
+      try {
+        const response = await fetch('/api/auth/status', { cache: 'no-store' });
+        if (response.ok) { window.location.reload(); return; }
+      } catch { /* still down */ }
+      if (Date.now() - startedAt > 60000) { output.textContent = t('access.restartSlow'); return; }
+      setTimeout(poll, 1000);
+    };
+    // Give the old process time to close its ports first.
+    setTimeout(poll, 2500);
+  }
+
+  function serviceCard() {
+    const output = h('p', { class: 'security-message', role: 'status' });
+    return card(t('access.serviceTitle'), t('access.serviceCaption'),
+      h('p', { class: 'modal-copy', text: t('access.restartHint') }),
+      h('div', { class: 'dialog-actions' }, h('button', { class: 'secondary-button', type: 'button', text: t('access.restart'), onclick: () => void restartBridge(output) })),
+      output);
+  }
+
   // background: a refresh nobody asked for; skipped while the user is typing in the form.
   function render({ background = false } = {}) {
     const view = document.getElementById('accessView');
     if (!view || !state.network) return;
     if (background && state.typing) return;
-    view.replaceChildren(h('div', { class: 'settings-layout' }, currentCard(), entrypointsCard(), hostsCard(), saveBar(), certificatesCard(), nginxCard()));
+    view.replaceChildren(h('div', { class: 'settings-layout' }, currentCard(), entrypointsCard(), hostsCard(), saveBar(), certificatesCard(), nginxCard(), webrtcCard(), serviceCard()));
     icons(view);
   }
 

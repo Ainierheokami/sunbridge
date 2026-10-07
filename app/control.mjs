@@ -34,6 +34,10 @@ const PEER_CHANNEL = 0xff;
 const COMMAND_SIZES = [0, 8, 48, 44, 8, 4, 6, 8, 24, 8, 12, 16, 24];
 
 const ENET_MTU = 1392;
+// Data per SEND_FRAGMENT command: the MTU less the datagram header (with sent time) and the 24-byte command.
+const ENET_FRAGMENT_BYTES = ENET_MTU - 8 - 24;
+// Largest message reassembled from fragments (clipboard frames are ~64 KB).
+const MAX_REASSEMBLED_BYTES = 1024 * 1024;
 const ENET_WINDOW_SIZE = 65536;
 const CONNECT_RETRY_MS = 500;
 const CONNECT_TIMEOUT_MS = 10000;
@@ -69,6 +73,8 @@ export const CONTROL_TYPE = Object.freeze({
   ENCRYPTED: 0x0001,
   HDR_MODE: 0x010e,
   RUMBLE_TRIGGERS: 0x5500,
+  // Foundation Sunshine clipboard sync: an opaque frame for its desktop agent (see clipboard.mjs).
+  CLIPBOARD: 0x5508,
 });
 
 const PERIODIC_PING_INTERVAL_MS = 100;
@@ -236,7 +242,11 @@ export class EnetClient extends EventEmitter {
     if (this.state !== 'connected') return false;
     if (channelId >= this.channelCount) channelId = 0;
     const payload = Buffer.from(data);
-    if (payload.length > ENET_MTU - 16) throw new RangeError('control message too large for a single ENet command');
+    if (payload.length > ENET_MTU - 16) {
+      // Larger than one datagram (clipboard sync): reliable fragments, reassembled by the host.
+      if (mode === 'unsequenced') throw new RangeError('control message too large for an unsequenced ENet command');
+      return this.sendFragments(channelId, payload);
+    }
     if (mode === 'unsequenced') {
       const command = Buffer.alloc(8 + payload.length);
       command[0] = CMD.SEND_UNSEQUENCED | FLAG_UNSEQUENCED;
@@ -260,6 +270,62 @@ export class EnetClient extends EventEmitter {
     this.trackReliable(channelId, channel.outgoingReliable, command);
     this.queue(command, true);
     return true;
+  }
+
+  // ENet SEND_FRAGMENT: each fragment is a reliable command with its own sequence number; startSequenceNumber
+  // (the first one's) ties them together. Layout after the 4-byte command header: startSequenceNumber u16,
+  // dataLength u16, fragmentCount u32, fragmentNumber u32, totalLength u32, fragmentOffset u32.
+  sendFragments(channelId, payload) {
+    const channel = this.channels[channelId];
+    const count = Math.ceil(payload.length / ENET_FRAGMENT_BYTES);
+    const start = (channel.outgoingReliable + 1) & 0xffff;
+    for (let index = 0; index < count; index += 1) {
+      const offset = index * ENET_FRAGMENT_BYTES;
+      const part = payload.subarray(offset, offset + ENET_FRAGMENT_BYTES);
+      channel.outgoingReliable = (channel.outgoingReliable + 1) & 0xffff;
+      const command = Buffer.alloc(24 + part.length);
+      command[0] = CMD.SEND_FRAGMENT | FLAG_ACKNOWLEDGE;
+      command[1] = channelId;
+      command.writeUInt16BE(channel.outgoingReliable, 2);
+      command.writeUInt16BE(start, 4);
+      command.writeUInt16BE(part.length, 6);
+      command.writeUInt32BE(count, 8);
+      command.writeUInt32BE(index, 12);
+      command.writeUInt32BE(payload.length, 16);
+      command.writeUInt32BE(offset, 20);
+      part.copy(command, 24);
+      this.trackReliable(channelId, channel.outgoingReliable, command);
+      this.queue(command, true);
+    }
+    return true;
+  }
+
+  // Reassemble a fragmented message; delivered once every fragment is in.
+  receiveFragment(channelId, seq, command) {
+    if (channelId >= this.channels.length) return;
+    const channel = this.channels[channelId];
+    const start = command.readUInt16BE(4);
+    const length = command.readUInt16BE(6);
+    const count = command.readUInt32BE(8);
+    const index = command.readUInt32BE(12);
+    const total = command.readUInt32BE(16);
+    const offset = command.readUInt32BE(20);
+    if (!count || index >= count || total > MAX_REASSEMBLED_BYTES || offset + length > total) return;
+    channel.fragments ||= new Map();
+    let entry = channel.fragments.get(start);
+    if (!entry) {
+      // Keep at most a few messages in reassembly; a stale one (its sender gave up) is dropped.
+      if (channel.fragments.size >= 4) channel.fragments.delete(channel.fragments.keys().next().value);
+      entry = { data: Buffer.alloc(total), received: new Set(), count };
+      channel.fragments.set(start, entry);
+    }
+    if (entry.received.has(index) || entry.count !== count || entry.data.length !== total) return;
+    command.copy(entry.data, offset, 24, 24 + length);
+    entry.received.add(index);
+    if (((seq - channel.incomingReliable) & 0xffff) < 0x8000) channel.incomingReliable = seq;
+    if (entry.received.size < count) return;
+    channel.fragments.delete(start);
+    this.emit('packet', channelId, entry.data);
   }
 
   ack(channelId, seq, sentTime) {
@@ -390,9 +456,12 @@ export class EnetClient extends EventEmitter {
       case CMD.SEND_UNSEQUENCED:
         this.emit('packet', channelId, Buffer.from(data));
         break;
+      case CMD.SEND_FRAGMENT:
+        // Messages larger than a datagram (clipboard frames).
+        this.receiveFragment(channelId, seq, command);
+        break;
       default:
         // PING, BANDWIDTH_LIMIT, THROTTLE_CONFIGURE: acknowledged above, nothing else to do.
-        // Fragments are not used by Sunshine for control messages we care about.
         break;
     }
   }
@@ -537,6 +606,8 @@ export class ControlStream extends EventEmitter {
       this.emit('rumble', { controller: payload.readUInt16LE(4), lowFreq: payload.readUInt16LE(6), highFreq: payload.readUInt16LE(8) });
     } else if (type === CONTROL_TYPE.HDR_MODE && payload.length >= 1) {
       this.emit('hdr', { enabled: payload[0] !== 0 });
+    } else if (type === CONTROL_TYPE.CLIPBOARD) {
+      this.emit('clipboard', payload);
     } else {
       this.emit('message', { type, payload, channelId });
     }

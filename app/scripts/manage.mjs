@@ -102,17 +102,12 @@ const ask = (question, fallback = '') => new Promise((resolve, reject) => {
     resolve(answer.trim() === '' ? fallback : answer.trim());
   });
 });
-const confirm = async (question, fallback = false) => {
-  const answer = (await ask(`${question} ${fallback ? '[Y/n]' : '[y/N]'} `, fallback ? 'y' : 'n')).toLowerCase();
-  return answer === 'y' || answer === 'yes' || answer === '是';
-};
-
 // Ctrl+C while the bridge owns the terminal reaches both processes; the bridge exits, the menu comes back.
 process.on('SIGINT', () => {});
 
-function runNode(args) {
+function runNode(args, env = process.env) {
   releasePrompt();
-  const result = spawnSync(process.execPath, args, { cwd: ROOT, stdio: 'inherit' });
+  const result = spawnSync(process.execPath, args, { cwd: ROOT, stdio: 'inherit', env });
   return result.status ?? 1;
 }
 
@@ -132,6 +127,8 @@ async function status() {
     if (!entry.proxy.enabled) for (const url of entryUrls(entry)) console.log(`      ${cyan(url)}`);
   }
   console.log(`  允许的地址     ${config.allowedHosts.length ? config.allowedHosts.join(', ') : dim('不限')}`);
+  const missing = missingDependencies();
+  console.log(`  WebRTC 组件    ${missing.length ? yellow(`未安装（${missing.join('、')}）`) + dim(` —— 运行 ${SCRIPT} deps 安装`) : green('已安装')}${config.webrtc?.enabled === false ? dim('，已在设置中关闭') : ''}`);
   const setupCode = readText(setupCodeFile(DATA_DIR));
   if (auth.user) {
     console.log(`  登录账号       ${auth.user.username}（${validSessions().length} 个有效登录会话）`);
@@ -155,13 +152,115 @@ async function status() {
   console.log('');
 }
 
+// Optional npm dependencies (package.json optionalDependencies; node-datachannel for WebRTC). Checked by
+// loading the modules themselves: npm reports success even when an optional package failed to download, so
+// its exit code proves nothing. Without them Sunbridge runs with media over WebSocket only.
+const NPM = IS_WINDOWS ? 'npm.cmd' : 'npm';
+const MIRROR = 'https://registry.npmmirror.com';
+
+function optionalDependencies() {
+  return readJson(path.join(ROOT, 'package.json'), {}).optionalDependencies || {};
+}
+
+// Missing = can't be loaded, not just can't be found: node-datachannel's JavaScript can be there with its native
+// part for this platform missing (an interrupted download, node_modules copied from another OS).
+// Loaded in a child process: Node remembers a failed load, so the check after installing would still fail here.
+function missingDependencies() {
+  return Object.keys(optionalDependencies()).filter((name) => spawnSync(process.execPath, ['-e', `require(${JSON.stringify(name)})`], { cwd: ROOT, stdio: 'ignore', timeout: 20000 }).status !== 0);
+}
+
+// package-lock.json newer than the last install (an update brought new versions).
+function dependenciesOutdated() {
+  const lock = path.join(ROOT, 'package-lock.json');
+  const installed = path.join(ROOT, 'node_modules', '.package-lock.json');
+  return fs.existsSync(lock) && fs.existsSync(installed) && fs.statSync(lock).mtimeMs > fs.statSync(installed).mtimeMs;
+}
+
+const npm = (args, options = {}) => spawnSync(NPM, args, { cwd: ROOT, shell: IS_WINDOWS, encoding: 'utf8', timeout: 180000, ...options });
+
+// After a failed install, starting doesn't try again for a day (offline it would cost a minute every time).
+const INSTALL_FAILED_FILE = path.join(DATA_DIR, '.deps-install-failed');
+const RETRY_AFTER_MS = 24 * 3600 * 1000;
+const recentlyFailed = () => { try { return Date.now() - fs.statSync(INSTALL_FAILED_FILE).mtimeMs < RETRY_AFTER_MS; } catch { return false; } };
+const noteInstall = (ok) => {
+  try {
+    if (ok) fs.rmSync(INSTALL_FAILED_FILE, { force: true });
+    else { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(INSTALL_FAILED_FILE, new Date().toISOString()); }
+  } catch { /* only a reminder */ }
+};
+
+// Why npm couldn't fetch: npm ping talks to the registry and fails with a readable error code.
+function diagnoseRegistry(registry) {
+  const ping = npm(['ping', '--fetch-retries=0', '--fetch-timeout=10000'], { timeout: 30000 });
+  if (ping.status === 0) return { reachable: true };
+  const text = `${ping.stdout || ''}\n${ping.stderr || ''}`;
+  const code = (text.match(/\b(ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|CERT_\w+|UNABLE_TO_\w+|SELF_SIGNED_\w+|E40[13]|E407)\b/) || [])[1];
+  const why = {
+    ECONNREFUSED: '连接被拒绝', ECONNRESET: '连接被重置', ETIMEDOUT: '连接超时', ENOTFOUND: '域名解析失败', EAI_AGAIN: '域名解析失败（DNS 暂时不可用）',
+    ENETUNREACH: '网络不可达', EHOSTUNREACH: '网络不可达', E401: '下载源要求登录', E403: '下载源拒绝访问', E407: '代理要求认证',
+  }[code] || (code ? `证书问题（${code}，常见于公司网络的代理）` : '无法访问');
+  return { reachable: false, why: `${why}：${registry}` };
+}
+
+// quiet: called on every start, says nothing when all is in place.
+function ensureDependencies({ quiet = true } = {}) {
+  let missing = missingDependencies();
+  const outdated = !missing.length && dependenciesOutdated();
+  if (!missing.length && !outdated) {
+    noteInstall(true);
+    if (!quiet) console.log(green('依赖已就绪：WebRTC 可用。'));
+    return true;
+  }
+  if (quiet && missing.length && recentlyFailed()) {
+    console.log(dim(`WebRTC 组件未安装，画面走 WebSocket。联网后运行 ${SCRIPT} deps 安装。`));
+    return false;
+  }
+  console.log(`\n${bold('安装依赖')} ${dim(missing.length ? `缺少 ${missing.join('、')}（WebRTC 需要，约 10 MB，只需安装一次）` : '程序更新后需要更新依赖')}`);
+  const version = npm(['--version']);
+  if (version.status !== 0) {
+    console.log(yellow('  未找到 npm（Node.js 自带）。请重新安装 Node.js 并保留 npm 组件：https://nodejs.org/'));
+    console.log(dim('  在此之前 Sunbridge 照常运行，画面走 WebSocket（没有 WebRTC）。'));
+    return false;
+  }
+  const registry = (npm(['config', 'get', 'registry']).stdout || '').trim();
+  console.log(dim(`  npm ${String(version.stdout).trim()}，下载源 ${registry || '默认'}`));
+  npm(['install', '--omit=dev', '--no-audit', '--no-fund', '--fetch-retries=1', '--fetch-timeout=30000'], { stdio: 'inherit', encoding: undefined });
+  missing = missingDependencies();
+  if (!missing.length) {
+    console.log(green('  依赖已安装：WebRTC 可用。\n'));
+    return true;
+  }
+  // npm skips an optional package it couldn't install without saying why (and exits 0): find out here.
+  noteInstall(false);
+  const diagnosis = diagnoseRegistry(registry || 'npm 下载源');
+  console.log(yellow(`  ${missing.join('、')} 没有装上：${diagnosis.reachable ? `下载源可以访问，但没有这个平台（${process.platform}-${process.arch}）可用的版本，或下载中途失败` : diagnosis.why}。`));
+  console.log(dim('  Sunbridge 照常运行，画面走 WebSocket（没有 WebRTC）。'));
+  console.log('  解决办法：');
+  if (!diagnosis.reachable && !registry.includes('npmmirror')) console.log(`    1. 访问 npm 慢或失败（国内常见）时换成镜像源：${cyan(`npm config set registry ${MIRROR}`)}`);
+  console.log(`    ${!diagnosis.reachable && !registry.includes('npmmirror') ? '2' : '1'}. 重新安装：${cyan(`${SCRIPT} deps`)}（或在 app 目录执行 ${cyan('npm install --omit=dev --loglevel=verbose')} 查看详细过程）`);
+  console.log(dim(`  之后 24 小时内启动不再自动重试，避免每次都等。\n`));
+  return false;
+}
+
+function installDependencies() {
+  return ensureDependencies({ quiet: false }) ? 0 : 1;
+}
+
 async function start() {
   if (await isRunning()) {
     console.log(red('Sunbridge 已经在运行（入口端口已被占用）。'));
     return 1;
   }
+  ensureDependencies();
   console.log(dim('按 Ctrl+C 停止 Sunbridge 并返回菜单。\n'));
-  const code = runNode(['server.mjs']);
+  // The bridge exits with this code when restarted from the web page: start it again.
+  const RESTART_EXIT_CODE = 75;
+  let code;
+  for (;;) {
+    code = runNode(['server.mjs'], { ...process.env, SUNBRIDGE_SUPERVISOR: 'manage' });
+    if (code !== RESTART_EXIT_CODE) break;
+    console.log(dim('\nSunbridge 正在重启…\n'));
+  }
   console.log(dim('\nSunbridge 已停止。'));
   return code;
 }
@@ -170,7 +269,6 @@ async function start() {
 async function resetNetwork() {
   if (environmentEntrypoint()) console.log(yellow('注意：设置了 SUNBRIDGE_PORT / SUNBRIDGE_BIND 等环境变量时，以环境变量为准。'));
   console.log('将把网络设置恢复为默认：所有网卡、端口 8091、HTTPS（自签名证书），不限制访问地址。证书文件不受影响。');
-  if (!await confirm('继续？', false)) return;
   const current = loadConfig(DATA_DIR);
   saveConfig(DATA_DIR, { ...defaultConfig(), allowedOrigins: current.allowedOrigins, certificateNames: current.certificateNames, extraCertificates: current.extraCertificates });
   console.log(green('已恢复默认网络设置。'));
@@ -193,13 +291,13 @@ function logoutAll() {
 // The way back in when the authenticator app and the recovery codes are both lost; only possible on this machine.
 async function twoFactorOff() {
   if (!loadAuthState(DATA_DIR).user?.twoFactor) { console.log(dim('两步验证没有启用。')); return; }
-  if (!await confirm('关闭两步验证？之后只用密码就能登录，可以随时在网页设置里重新开启。', false)) return;
   disableTwoFactor(DATA_DIR);
-  console.log(green('已关闭两步验证。运行中的 Sunbridge 会立即生效。'));
+  console.log(green('已关闭两步验证：之后只用密码就能登录，可以随时在网页设置里重新开启。运行中的 Sunbridge 会立即生效。'));
 }
 
 const COMMANDS = {
   start: { label: '启动 Sunbridge', run: start },
+  deps: { label: '安装 / 修复依赖（WebRTC 组件）', run: installDependencies },
   status: { label: '查看状态、访问地址和最近的警告', run: status },
   'reset-network': { label: '恢复默认网络设置（网页打不开时）', run: resetNetwork },
   passwd: { label: '重置登录密码', run: setPassword },

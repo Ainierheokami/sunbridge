@@ -325,6 +325,7 @@
       ['[data-toggle="show-telemetry"]', 'settings.telemetry', 'settings.telemetryHint'],
       ['[data-toggle="ask-launch"]', 'settings.askLaunch', 'settings.askLaunchHint'],
       ['[data-toggle="reduce-motion"]', 'settings.reduceMotion', 'settings.reduceMotionHint'],
+      ['[data-toggle="clipboard-sync"]', 'settings.clipboardSync', 'settings.clipboardSyncHint'],
     ];
     settingText.forEach(([selector, titleKey, hintKey]) => { const toggle = qs(selector); if (!toggle) return; const row = toggle.closest('.setting-row'); setText('strong', t(titleKey), row); setText('small', t(hintKey), row); });
     const rowCopy = [['#controlModeRow', 'settings.controlMode', 'settings.controlModeHint'], ['#bitrateModeRow', 'settings.bitrateMode', 'settings.bitrateModeHint']];
@@ -526,13 +527,25 @@
     const legend = qs('.map-legend'); if (legend) legend.innerHTML = '<span><i class="legend-dot is-green"></i> ' + esc(t('network.paired')) + '</span><span><i class="legend-dot is-blue"></i> ' + esc(t('network.controlOnly')) + '</span>';
     const log = qs('#diagnosticLog');
     if (log) {
-      const status = qs('#diagnosticStatus', log); if (status) status.textContent = t(state.diagnostic.status === 'running' ? 'network.running' : state.diagnostic.status === 'healthy' ? 'network.healthy' : state.diagnostic.status === 'demo' ? 'network.demo' : state.diagnostic.status === 'failed' ? 'diagnostic.failed' : 'network.idle');
+      const status = qs('#diagnosticStatus', log); if (status && result?.worst && state.diagnostic.status !== 'running') { status.textContent = t('diag.summary.' + result.worst); status.dataset.level = result.worst; } else if (status) status.textContent = t(state.diagnostic.status === 'running' ? 'network.running' : state.diagnostic.status === 'healthy' ? 'network.healthy' : state.diagnostic.status === 'demo' ? 'network.demo' : state.diagnostic.status === 'failed' ? 'diagnostic.failed' : 'network.idle');
       const lines = qs('.log-lines', log);
       if (lines) {
         if (!host) {
           lines.innerHTML = '<div><time>—</time><span class="log-ok">--</span><code>' + esc(t('diagnostic.noHost')) + '</code><small>—</small></div>';
         } else if (state.diagnostic.status === 'running') {
           lines.innerHTML = '<div><time>…</time><span class="log-ok">--</span><code>bridge.ping("' + esc(host.address) + '")</code><small>' + esc(t('network.running')) + '</small></div>';
+        } else if (result?.checks?.length) {
+          // Full diagnosis: one row per check, by the leg it tests.
+          const badge = { ok: ['OK', 'log-ok'], warn: ['WARN', 'log-warn'], fail: ['ERR', 'log-error'], skip: ['—', 'log-muted'], info: ['i', 'log-muted'] };
+          const groups = ['host', 'stream', 'bridge', 'browser'];
+          lines.innerHTML = groups.map((group) => {
+            const rows = result.checks.filter((check) => check.group === group);
+            if (!rows.length) return '';
+            return '<p class="diag-group">' + esc(t('diag.group.' + group)) + '</p>' + rows.map((check) => {
+              const [label, className] = badge[check.status] || badge.info;
+              return '<div class="diag-row"><span class="' + className + '">' + esc(label) + '</span><strong>' + esc(t('diag.' + check.id)) + '</strong><small>' + esc(check.detail || '') + '</small><time>' + esc(check.elapsedMs != null ? check.elapsedMs + ' ms' : '') + '</time></div>';
+            }).join('');
+          }).join('');
         } else if (result) {
           const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           const controlClass = isDemoResult ? 'log-muted' : controlReachable ? 'log-ok' : 'log-error';
@@ -569,14 +582,24 @@
     const unprobed = { label: t('network.notProbed'), className: 'is-muted' };
     const httpsState = controlProtocol === 'HTTPS' ? controlState : host ? unprobed : stateFor(null);
     const httpState = controlProtocol === 'HTTP' ? controlState : host ? unprobed : stateFor(null);
+    // With a full diagnosis every port has a measured state; UDP ones only while a stream runs.
+    const checked = (id, fallback) => {
+      const check = result?.checks?.find((item) => item.id === id);
+      if (!check) return fallback;
+      if (check.status === 'ok') return { label: t('diagnostic.reachable'), className: 'is-ok' };
+      if (check.status === 'fail') return { label: t('diagnostic.unreachable'), className: 'is-error' };
+      if (check.status === 'warn') return { label: t('diag.port.partial'), className: 'is-muted' };
+      return { label: t('diag.port.duringStream'), className: 'is-muted' };
+    };
+    const udp = (id) => (result?.checks ? checked(id, checked('stream.udp', unprobed)) : unprobed);
     const ports = [
-      ['HTTPS', host?.httpsPort || 47984, 'TCP', httpsState, ''],
-      ['HTTP', host?.httpPort || 47989, 'TCP', httpState, ''],
-      [t('network.webUi'), 47990, 'TCP', unprobed, ''],
-      ['RTSP', host?.rtspPort || 48010, 'TCP', rtspState, 'is-blue'],
-      [t('common.video'), 47998, 'UDP', unprobed, 'is-blue'],
-      [t('common.input'), 47999, 'UDP', unprobed, 'is-blue'],
-      [t('common.audio'), 48000, 'UDP', unprobed, 'is-blue'],
+      ['HTTPS', host?.httpsPort || 47984, 'TCP', checked('host.https', httpsState), ''],
+      ['HTTP', host?.httpPort || 47989, 'TCP', checked('host.http', httpState), ''],
+      [t('network.webUi'), 47990, 'TCP', checked('host.webui', unprobed), ''],
+      ['RTSP', host?.rtspPort || 48010, 'TCP', checked('host.rtsp', rtspState), 'is-blue'],
+      [t('common.video'), 47998, 'UDP', udp('stream.video'), 'is-blue'],
+      [t('common.input'), 47999, 'UDP', udp('stream.control'), 'is-blue'],
+      [t('common.audio'), 48000, 'UDP', udp('stream.audio'), 'is-blue'],
     ];
     table.innerHTML = '<div class="port-row port-head"><span>' + esc(t('network.service')) + '</span><span>' + esc(t('network.port')) + '</span><span>' + esc(t('network.transport')) + '</span><span>' + esc(t('network.state')) + '</span></div>' + ports.map((row) => '<div class="port-row"><span>' + esc(row[0]) + '</span><strong>' + esc(row[1]) + '</strong><span>' + esc(row[2]) + '</span><span class="port-state ' + row[4] + ' ' + row[3].className + '"><i></i> ' + esc(row[3].label) + '</span></div>').join('');
   };
@@ -609,6 +632,14 @@
   };
 
   const renderStream = (phase = 'idle') => {
+    // "Send clipboard" button: only while the host accepts clipboard data and sync is on.
+    const clipboardButton = qs('#streamClipboardButton');
+    if (clipboardButton) {
+      const capability = state.clipboardSync?.state.capability;
+      clipboardButton.hidden = !(capability?.text || capability?.image) || localStorage.getItem('sunbridge.setting.clipboard-sync') === 'false';
+      clipboardButton.title = t('clipboard.send');
+      clipboardButton.setAttribute('aria-label', t('clipboard.send'));
+    }
     const stream = qs('#streamOverlay');
     if (!stream) return;
     const host = state.streamHost;
@@ -669,12 +700,19 @@
       demo: t('session.inputDemo'),
       unknown: t('session.inputUnknown'),
     };
+    // The codec actually being decoded, and whether the decoder runs on hardware.
+    const videoStats = state.videoPipeline?.stats || {};
+    const videoFamily = videoStats.codecFamily || state.streamSession?.videoCodec || 'h264';
+    const videoText = {
+      codec: { av1: 'AV1', hevc: 'HEVC', h264: 'H.264' }[videoFamily] || videoFamily,
+      mode: t('session.decodeMode.' + (videoStats.hardware === true ? 'hardware' : videoStats.hardware === false ? 'software' : 'auto')),
+    };
     const decoderLabels = {
-      unsupported: t('session.videoDecoderUnsupported'),
-      'waiting-keyframe': t('session.videoWaitingForKeyframe'),
-      receiving: t('session.videoWaitingForKeyframe'),
-      playing: t('session.videoPlaying'),
-      'decode-error': t('session.videoDecodeFailed'),
+      unsupported: t('session.videoDecoderUnsupported', videoText),
+      'waiting-keyframe': t('session.videoWaitingForKeyframe', videoText),
+      receiving: t('session.videoWaitingForKeyframe', videoText),
+      playing: t('session.videoPlaying', videoText),
+      'decode-error': t('session.videoDecodeFailed', videoText),
       stopped: '—',
       demo: t('session.mediaDemo'),
       unknown: '—',
@@ -723,8 +761,8 @@
     setText('#streamFooterStatus', host ? host.name + ' · ' + (hasControl ? t('session.controlPlane') : t('session.controlStarting')) : t('session.controlPlane'));
     const shown = state.streamSession?.width ? state.streamSession : effectiveStream(state.streamHost);
     setText('#streamFooterResolution', shown.width + '×' + shown.height + ' / ' + shown.fps + ' fps');
-    setText('#streamFooterTransport', bridge.isDemo ? t('protocol.demo') : t('protocol.live'));
-    setText('#streamFooterBridge', bridge.isDemo ? t('app.modeDemo') : t('app.modeLive'));
+    // Media channel (was a fixed "live control plane / live mode" label).
+    setText('#streamFooterTransport', bridge.isDemo ? t('app.modeDemo') : state.bridgeStats?.transport === 'webrtc' ? 'WebRTC' : state.bridgeStats ? 'WebSocket' : '—');
     setText('#streamHint', t('session.pointerHint'));
     state.streamStatusRows = [
       [t('stats.rtsp'), rtspLabel, rtspState],
@@ -755,10 +793,10 @@
       else if (gatewayState === 'unsupported') message = t('session.browserMediaUnsupported');
       else if (gatewayState === 'failed') message = t('session.browserMediaFailed');
       else if (gatewayState === 'disconnected') message = t('session.browserMediaDisconnected');
-      else if (decoderState === 'unsupported') message = t('session.videoDecoderUnsupported');
-      else if (decoderState === 'decode-error') message = t('session.videoDecodeFailed');
-      else if (decoderState === 'playing') message = t('session.videoPlaying');
-      else if (gatewayState === 'connected' && mediaState === 'connected' && decoderState === 'waiting-keyframe') message = t('session.videoWaitingForKeyframe');
+      else if (decoderState === 'unsupported') message = t('session.videoDecoderUnsupported', videoText);
+      else if (decoderState === 'decode-error') message = t('session.videoDecodeFailed', videoText);
+      else if (decoderState === 'playing') message = t('session.videoPlaying', videoText);
+      else if (gatewayState === 'connected' && mediaState === 'connected' && decoderState === 'waiting-keyframe') message = t('session.videoWaitingForKeyframe', videoText);
       else if (gatewayState === 'connected') message = t('session.browserMediaConnected');
       else if (rtspState === 'negotiated' && mediaState === 'waiting') message = t('session.mediaWaitingDetail');
       else if (rtspState === 'connected') message = t('session.rtspConnectedDetail');
@@ -931,6 +969,92 @@
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Browser-side checks of the diagnosis: this device and its link to the bridge.
+  // ---------------------------------------------------------------------------
+  // A real WebRTC connection to the bridge's UDP port (the one streams use), with its round trip.
+  const testWebrtc = async () => {
+    if (typeof RTCPeerConnection !== 'function') return { status: 'fail', detail: t('diag.detail.webrtcUnsupported') };
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    const channel = pc.createDataChannel('probe');
+    let target = null;
+    try {
+      const started = performance.now();
+      await pc.setLocalDescription(await pc.createOffer());
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') { resolve(); return; }
+        pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') resolve(); };
+        window.setTimeout(resolve, 1000);
+      });
+      let answer;
+      try { answer = await bridge.webrtcTest(pc.localDescription.sdp); } catch (error) {
+        return error?.errorCode === 'WEBRTC_UNAVAILABLE' ? { status: 'warn', detail: t('diag.detail.webrtcOff') } : { status: 'fail', detail: errorMessage(error) };
+      }
+      if (!answer?.sdp) return { status: 'warn', detail: t('diag.detail.webrtcOff') };
+      target = answer.target;
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+      await new Promise((resolve, reject) => {
+        if (channel.readyState === 'open') { resolve(); return; }
+        channel.onopen = resolve;
+        window.setTimeout(() => reject(new Error('timeout')), 8000);
+      });
+      const connectMs = Math.round(performance.now() - started);
+      const rtts = [];
+      for (let index = 0; index < 5; index += 1) {
+        const sent = performance.now();
+        await new Promise((resolve) => { channel.onmessage = resolve; channel.send(String(index)); window.setTimeout(resolve, 2000); });
+        rtts.push(performance.now() - sent);
+      }
+      rtts.sort((a, b) => a - b);
+      let path = target ? `${target.host}:${target.port}` : '';
+      try {
+        const stats = await pc.getStats();
+        stats.forEach((item) => {
+          if (item.type === 'candidate-pair' && item.state === 'succeeded' && item.nominated) {
+            const remote = stats.get(item.remoteCandidateId);
+            if (remote?.address || remote?.ip) path = `${remote.address || remote.ip}:${remote.port}`;
+          }
+        });
+      } catch { /* the target is shown instead */ }
+      const rtt = Math.round(rtts[Math.floor(rtts.length / 2)]);
+      return { status: rtt > 150 ? 'warn' : 'ok', detail: t('diag.detail.webrtcOk', { path, connect: connectMs, rtt }), elapsedMs: connectMs };
+    } catch {
+      return { status: 'fail', detail: t('diag.detail.webrtcFail', { target: target ? `${target.host}:${target.port}` : '—' }) };
+    } finally {
+      try { pc.close(); } catch { /* closed */ }
+    }
+  };
+
+  const browserChecks = async () => {
+    const checks = [];
+    const add = (id, status, detail, elapsedMs = null) => checks.push({ id, group: 'browser', status, detail, elapsedMs });
+    add('browser.secure', window.isSecureContext ? 'ok' : 'fail', t(window.isSecureContext ? 'diag.detail.secureOk' : 'diag.detail.secureFail'));
+    const samples = [];
+    for (let index = 0; index < 5; index += 1) {
+      const started = performance.now();
+      try { await fetch('/api/bridge/health', { cache: 'no-store' }); samples.push(performance.now() - started); } catch { /* counted as missing */ }
+    }
+    samples.sort((a, b) => a - b);
+    const rtt = samples.length ? Math.round(samples[Math.floor(samples.length / 2)]) : null;
+    add('browser.rtt', rtt == null ? 'fail' : rtt > 150 ? 'warn' : 'ok', rtt == null ? t('diag.detail.rttFail') : t('diag.detail.rtt', { rtt, count: samples.length }), rtt);
+    const webrtc = await testWebrtc();
+    add('browser.webrtc', webrtc.status, webrtc.detail, webrtc.elapsedMs);
+    const size = adaptiveSize();
+    const support = await decodableCodecs({ ...size, fps: state.settings.fps || 60 });
+    const mode = (codec) => t('stats.decodeMode.' + (support[codec + 'Hw'] ? 'hw' : support[codec] ? 'sw' : 'no'));
+    add('browser.decoders', support.av1Hw || support.hevcHw || support.h264Hw ? 'ok' : support.h264 ? 'warn' : 'fail',
+      t('diag.detail.decoders', { size: `${size.width}×${size.height}`, av1: mode('av1'), hevc: mode('hevc'), h264: mode('h264') }));
+    let opus = false;
+    try { opus = (await window.AudioDecoder?.isConfigSupported?.({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 }))?.supported === true; } catch { opus = false; }
+    add('browser.audio', opus && typeof window.AudioWorkletNode === 'function' ? 'ok' : 'fail', t(opus ? 'diag.detail.audioOk' : 'diag.detail.audioFail'));
+    const worker = typeof window.Worker === 'function' && typeof HTMLCanvasElement !== 'undefined' && 'transferControlToOffscreen' in HTMLCanvasElement.prototype;
+    add('browser.worker', worker ? 'ok' : 'info', t(worker ? 'diag.detail.workerOk' : 'diag.detail.workerNo'));
+    let clipboard = navigator.clipboard ? 'available' : 'missing';
+    try { if (navigator.clipboard) clipboard = (await navigator.permissions.query({ name: 'clipboard-read' })).state; } catch { /* not queryable here */ }
+    add('browser.clipboard', clipboard === 'denied' || clipboard === 'missing' ? 'warn' : 'ok', t('diag.detail.clipboard.' + clipboard));
+    return checks;
+  };
+
   const runDiagnostic = async ({ silent = false } = {}) => {
     const host = currentHost();
     if (!host) {
@@ -943,7 +1067,12 @@
     renderNetwork();
     if (!silent) showToast(t('diagnostic.running'), t('diagnostic.copy'));
     try {
-      const result = await bridge.ping(host);
+      // Silent (page load): the quick reachability ping. The button: the full diagnosis.
+      const result = silent ? await bridge.ping(host) : await bridge.diagnose(host);
+      if (!silent && !result?.demo) {
+        result.checks = [...(result.checks || []), ...(await browserChecks())];
+        result.worst = result.checks.some((check) => check.status === 'fail') ? 'fail' : result.checks.some((check) => check.status === 'warn') ? 'warn' : 'ok';
+      }
       const isDemoResult = Boolean(result?.demo);
       const controlReachable = isDemoResult ? null : Array.isArray(result?.probes) ? result.probes.some((probe) => probe?.ok) : result?.latency != null;
       state.diagnostic = { status: isDemoResult ? 'demo' : controlReachable ? 'healthy' : 'failed', result, error: isDemoResult || controlReachable ? null : t('diagnostic.unreachable') };
@@ -951,7 +1080,10 @@
       renderAll();
       if (!silent) {
         if (isDemoResult) showToast(t('diagnostic.demo'), t('diagnostic.demoDetail'), 'success');
-        else if (controlReachable) showToast(t('diagnostic.clean'), t('diagnostic.result', { latency: formatMs(result.latency), jitter: formatMs(result.jitter), loss: formatLoss(result.loss) }), 'success');
+        else if (result.checks) {
+          const count = (status) => result.checks.filter((check) => check.status === status).length;
+          showToast(t('diag.summary.' + result.worst), t('diag.counts', { ok: count('ok'), warn: count('warn'), fail: count('fail') }), result.worst === 'ok' ? 'success' : 'warning');
+        } else if (controlReachable) showToast(t('diagnostic.clean'), t('diagnostic.result', { latency: formatMs(result.latency), jitter: formatMs(result.jitter), loss: formatLoss(result.loss) }), 'success');
         else showToast(t('diagnostic.failed'), t('diagnostic.unreachable'), 'warning');
       }
       return result;
@@ -999,9 +1131,10 @@
   const PING_INTERVAL_MS = 1000;
   // Queueing delay on the bridge -> browser path: the bridge stamps each envelope with its clock (32-bit ms);
   // arrival minus stamp includes an unknown clock offset, so only the excess over the 30 s minimum counts.
-  const noteOneWayDelay = (receivedAt) => {
+  // arrivedAt: when the message really arrived (the media worker stamps it), else now.
+  const noteOneWayDelay = (receivedAt, arrivedAt = Date.now()) => {
     if (!Number.isFinite(receivedAt)) return;
-    const delay = ((Date.now() >>> 0) - receivedAt) | 0;
+    const delay = ((arrivedAt >>> 0) - receivedAt) | 0;
     const owd = state.owd;
     const second = Math.floor(performance.now() / 1000);
     const bucket = owd.buckets[owd.buckets.length - 1];
@@ -1036,6 +1169,7 @@
     state.bridgeStats = null;
     state.browserRttMs = null;
     state.liveStats = null;
+    state.decoderPace = null;
   };
   resetLiveStats();
 
@@ -1057,7 +1191,9 @@
       codec: video.codec || null,
       decodedWidth: state.liveCanvasSize?.width || 0,
       decodedHeight: state.liveCanvasSize?.height || 0,
-      droppedPackets: state.bridgeStats?.droppedPackets || 0,
+      // Frame transport drops whole frames for backpressure, packet transport single packets.
+      droppedPackets: (state.bridgeStats?.frameTransport ? state.bridgeStats?.droppedFrames : state.bridgeStats?.droppedPackets) || 0,
+      hardware: video.hardware ?? null,
     };
   };
 
@@ -1093,6 +1229,7 @@
       decodeQueue: now.decodeQueue,
       backlogResets: now.backlogResets,
       codec: now.codec,
+      hardware: now.hardware,
       decodedWidth: now.decodedWidth,
       decodedHeight: now.decodedHeight,
       hostProcessing, assembly, decode, hostRtt, hostRttVariance: bridge.hostRttVarianceMs ?? null, browserRtt, total,
@@ -1106,6 +1243,7 @@
 
   const renderHud = () => {
     const hud = qs('#streamHud'); if (!hud) return;
+    if (!bridge.isDemo) setText('#streamFooterTransport', state.bridgeStats?.transport === 'webrtc' ? 'WebRTC' : state.bridgeStats ? 'WebSocket' : '—');
     const live = state.liveStats;
     hud.hidden = localStorage.getItem('sunbridge.setting.show-telemetry') === 'false' && !state.statsExpanded;
     setText('#hudFps', live ? fmt(live.fps) : '—');
@@ -1118,6 +1256,33 @@
     const section = (title, rows) => '<section><h4>' + esc(title) + '</h4>' + rows.join('') + '</section>';
     const target = live?.target || {};
     const abr = state.bridgeStats?.abr || null;
+    const hostLeg = state.bridgeStats?.hostLeg || null;
+    const browserLeg = state.bridgeStats?.browserLeg || null;
+    const mbps = (kbps, digits = 1) => fmt(kbps / 1000, digits) + ' Mbps';
+    // Clipboard sync: what the host accepts, or why it is off.
+    const clipboardText = () => {
+      const sync = state.clipboardSync?.state;
+      if (localStorage.getItem('sunbridge.setting.clipboard-sync') === 'false') return t('clipboard.state.off');
+      if (!sync?.supported) return t('clipboard.state.unsupported');
+      if (!sync.capability.text && !sync.capability.image) return t('clipboard.state.hostOff');
+      const kinds = [sync.capability.text && t('clipboard.kind.text'), sync.capability.image && t('clipboard.kind.image')].filter(Boolean).join(t('clipboard.kind.and'));
+      return kinds + (sync.readBlocked ? ' · ' + t('clipboard.state.readBlocked') : '');
+    };
+    // WebRTC (UDP) or WebSocket (TCP), and why not WebRTC when it isn't.
+    const transportText = () => {
+      const bridgeSide = state.bridgeStats?.transport;
+      const info = state.mediaTransportInfo;
+      if (bridgeSide === 'webrtc') return t('stats.transportWebrtc');
+      if (info?.state === 'connecting') return t('stats.transportWebsocket') + ' · ' + t('stats.webrtcConnecting');
+      const reason = info?.reason || state.bridgeStats?.webrtc?.reason;
+      return t('stats.transportWebsocket') + (reason ? ' · ' + t('stats.webrtcReason', { reason: t('stats.webrtcReason.' + reason) }) : '');
+    };
+    const codecName = (codec) => ({ av1: 'AV1', hevc: 'HEVC', h264: 'H.264' }[codec] || codec);
+    // Browser: each codec and how it decodes it (as probed for this stream's size); host: what it encodes.
+    const negotiationText = (n) => (!n ? '—' : t('stats.negotiationValue', {
+      browser: n.decode ? ['av1', 'hevc', 'h264'].map((codec) => codecName(codec) + ' ' + t('stats.decodeMode.' + n.decode[codec])).join(', ') : '—',
+      host: n.host.map(codecName).join(' / ') + (n.hostSource === 'serverinfo' ? '' : ' (' + t('stats.hostSource.' + n.hostSource) + ')'),
+    }) + (n.switchedFrom ? ' · ' + t('stats.codecSwitched', { from: codecName(n.switchedFrom) }) : ''));
     const audio = state.audioPipeline?.stats || {};
     const lossLevel = !live ? '' : live.lossPercent >= 5 ? 'bad' : live.lossPercent > 0.5 ? 'warn' : '';
     detail.innerHTML =
@@ -1127,26 +1292,40 @@
         row(t('stats.renderedFps'), live ? fmt(live.fps, 1) + ' fps' : '—'),
         row(t('stats.decodedFps'), live ? fmt(live.decodedFps, 1) + ' fps' : '—'),
         row(t('stats.receivedFps'), live ? fmt(live.receivedFps, 1) + ' fps' : '—'),
-        row(t('stats.codec'), live?.codec ? String(live.codec).replace(/^avc1\..*/, 'H.264').replace(/^(hev1|hvc1)\..*/, 'HEVC').replace(/^av01\..*/, 'AV1') : '—'),
+        row(t('stats.codec'), live?.codec ? String(live.codec).replace(/^avc1\..*/, 'H.264').replace(/^(hev1|hvc1)\..*/, 'HEVC').replace(/^av01\..*/, 'AV1') + ' · ' + t('stats.decoder.' + (live.hardware === true ? 'hardware' : live.hardware === false ? 'software' : 'auto')) : '—', live?.hardware === false ? 'warn' : ''),
+        row(t('stats.negotiation'), negotiationText(state.bridgeStats?.codecNegotiation)),
+        row(t('stats.clipboard'), clipboardText(), state.clipboardSync?.state.readBlocked ? 'warn' : ''),
+        row(t('stats.mediaTransport'), transportText(), state.bridgeStats?.transport === 'webrtc' ? '' : 'warn'),
         row(t('stats.transport'), state.bridgeStats ? (state.bridgeStats.frameTransport ? t('stats.transportFrames', { fec: state.bridgeStats.fecPercent ?? '—' }) : t('stats.transportPackets')) + (state.bridgeStats.audioPacketMs ? ' · ' + t('stats.audioPackets', { ms: state.bridgeStats.audioPacketMs }) : '') : '—'),
         row(t('stats.decodeQueue'), live ? String(live.decodeQueue) + (live.backlogResets ? ' · ' + t('stats.backlogResets', { count: live.backlogResets }) : '') : '—', live?.decodeQueue > 2 || live?.backlogResets ? 'warn' : ''),
       ]) +
-      section(t('stats.network'), [
-        row(t('stats.traffic'), live ? fmt(live.mbps, 2) + ' Mbps' : '—'),
-        row(t('stats.targetBitrate'), abr ? fmt(abr.targetKbps / 1000, 1) + ' / ' + fmt(abr.capKbps / 1000, 1) + ' Mbps' : target.kbps ? fmt(target.kbps / 1000, 1) + ' Mbps' : '—', abr?.state === 'congested' ? 'warn' : ''),
-        row(t('stats.hostRate'), abr?.measuredKbps != null ? fmt(abr.measuredKbps / 1000, 2) + ' Mbps' + (abr.encoderKbps ? ' · ' + t('stats.encoderSetting', { value: fmt(abr.encoderKbps / 1000, 1) }) : '') : '—', abr?.measuredKbps > abr?.targetKbps * 1.1 ? 'warn' : ''),
-        row(t('stats.bitrateControl'), abr ? t('bitrate.' + abr.mode) + (abr.mode === 'auto' ? ' · ' + t('bitrate.state.' + (abr.state || 'starting')) : '') : '—'),
-        row(t('stats.queueDelay'), state.queueDelayMs != null ? fmtMs(state.queueDelayMs) : '—', latencyLevel(state.queueDelayMs != null ? state.queueDelayMs * 2 : null)),
+      section(t('stats.bitrateControl'), [
+        row(t('stats.mode'), abr ? t('bitrate.' + abr.mode) + (abr.mode === 'auto' ? ' · ' + t('bitrate.state.' + (abr.state || 'starting')) : '') : '—', abr?.state === 'congested' ? 'warn' : ''),
+        row(t('stats.targetBitrate'), abr ? mbps(abr.targetKbps) + ' / ' + mbps(abr.capKbps) : target.kbps ? mbps(target.kbps) : '—'),
+        row(t('stats.limitedBy'), abr?.mode === 'auto' && abr.limitedBy ? t('stats.limitedBy.' + abr.limitedBy) : '—', abr?.limitedBy && abr.limitedBy !== 'cap' ? 'warn' : ''),
         row(t('stats.reconnects'), String(state.bridgeStats?.reconnects ?? 0)),
+      ]) +
+      section(t('stats.hostLeg'), [
+        row(t('stats.encoderTarget'), hostLeg?.encoderKbps ? mbps(hostLeg.encoderKbps) : '—'),
+        row(t('stats.hostReceived'), hostLeg?.kbps != null ? mbps(hostLeg.kbps, 2) : '—', abr && hostLeg?.kbps > abr.targetKbps * 1.25 ? 'warn' : ''),
+        row(t('stats.hostLoss'), hostLeg?.lossPercent != null ? fmt(hostLeg.lossPercent, 1) + '% · ' + t('stats.lostTotal', { count: hostLeg.lostPackets }) : '—', hostLeg?.lossPercent > 2 ? 'bad' : hostLeg?.lossPercent > 0 ? 'warn' : ''),
+        row(t('stats.fecRecovered'), hostLeg?.recoveredShards != null ? String(hostLeg.recoveredShards) + (hostLeg.unrecoveredFrames ? ' · ' + t('stats.unrecovered', { count: hostLeg.unrecoveredFrames }) : '') : live ? String(live.recoveredShards) : '—', hostLeg?.unrecoveredFrames ? 'warn' : ''),
+        row(t('stats.segmentLimit'), hostLeg?.limitKbps ? mbps(hostLeg.limitKbps) + ' · ' + t('bitrate.state.' + (hostLeg.state || 'starting')) : '—', hostLeg?.state === 'congested' ? 'warn' : ''),
         row(t('stats.hostRtt'), live?.hostRtt != null ? fmtMs(live.hostRtt) + (live.hostRttVariance != null ? ' ± ' + Math.round(live.hostRttVariance) : '') : '—', latencyLevel(live?.hostRtt)),
-        row(t('stats.browserRtt'), fmtMs(live?.browserRtt), latencyLevel(live?.browserRtt)),
-        row(t('stats.frameLoss'), live ? fmt(live.lossPercent, 1) + '% · ' + t('stats.lostTotal', { count: live.lostFrames }) : '—', lossLevel),
-        row(t('stats.fecRecovered'), live ? String(live.recoveredShards) : '—'),
+      ]) +
+      section(t('stats.browserLeg'), [
+        row(t('stats.bridgeSent'), browserLeg?.sentKbps != null ? mbps(browserLeg.sentKbps, 2) : '—'),
+        row(t('stats.browserReceived'), live ? fmt(live.mbps, 2) + ' Mbps' : '—'),
+        row(t('stats.segmentLimit'), browserLeg?.limitKbps ? mbps(browserLeg.limitKbps) + ' · ' + t('bitrate.state.' + (browserLeg.state || 'starting')) : '—', browserLeg?.state === 'congested' ? 'warn' : ''),
+        row(t('stats.queueDelay'), state.queueDelayMs != null ? fmtMs(state.queueDelayMs) : '—', latencyLevel(state.queueDelayMs != null ? state.queueDelayMs * 2 : null)),
         row(t('stats.congestionDrops'), live ? String(live.droppedPackets) + (state.bridgeStats?.drainEpisodes ? ' · ' + t('stats.drainEpisodes', { count: state.bridgeStats.drainEpisodes }) : '') : '—', state.bridgeStats?.draining ? 'bad' : live?.droppedPackets ? 'warn' : ''),
+        row(t('stats.frameLoss'), live ? fmt(live.lossPercent, 1) + '% · ' + t('stats.lostTotal', { count: live.lostFrames }) : '—', lossLevel),
+        row(t('stats.browserRtt'), fmtMs(live?.browserRtt), latencyLevel(live?.browserRtt)),
       ]) +
       section(t('stats.audio'), [
         row(t('stats.audioBuffer'), audio.bufferedMs != null ? fmtMs(audio.bufferedMs) + ' / ' + t('stats.audioTarget', { value: audio.targetBufferMs }) : '—'),
         row(t('stats.audioUnderruns'), audio.underruns != null ? String(audio.underruns) : '—', audio.underruns ? 'warn' : ''),
+        row(t('stats.audioConcealed'), audio.concealedGaps != null ? t('stats.audioConcealedValue', { count: audio.concealedGaps, ms: Math.round(audio.concealedMs || 0) }) : '—', audio.concealedGaps ? 'warn' : ''),
       ]) +
       section(t('stats.latency'), [
         row(t('stats.hostProcessing'), fmtMs(live?.hostProcessing)),
@@ -1177,13 +1356,31 @@
     }
   };
 
+  // AV1 / HEVC decoding in software that can't hold the frame rate (backlog resets, or decoding slower than
+  // frames arrive for ~3 s): switch the host to the next codec rather than drop frames for the whole session.
+  const checkDecoderPace = (live) => {
+    const video = state.videoPipeline?.stats;
+    if (!live || !video || video.hardware === true || !['av1', 'hevc'].includes(video.codecFamily)) { state.decoderPace = null; return; }
+    const now = performance.now();
+    let pace = state.decoderPace;
+    // Backlog resets count within a 20 s window.
+    if (!pace || now - pace.since > 20000) pace = state.decoderPace = { resets: live.backlogResets, since: now, slowTicks: pace?.slowTicks || 0 };
+    const frameMs = 1000 / (live.target?.fps || 60);
+    pace.slowTicks = live.decode != null && live.decode > frameMs * 1.5 ? pace.slowTicks + 1 : 0;
+    if (live.backlogResets - pace.resets >= 2 || pace.slowTicks >= 6) {
+      state.decoderPace = null;
+      fallBackFromCodec(video.codecFamily, 'slow-decode');
+    }
+  };
+
   const statsTick = () => {
     if (qs('#streamOverlay')?.hidden) return;
     checkStall();
     const canvas = qs('#streamVideoCanvas');
-    state.liveCanvasSize = state.videoDecoderState === 'playing' && canvas ? { width: canvas.width, height: canvas.height } : null;
+    state.liveCanvasSize = state.videoDecoderState === 'playing' && canvas ? videoSizeOf(canvas) : null;
     state.liveStats = computeLiveStats();
     sendFeedback(state.liveStats);
+    checkDecoderPace(state.liveStats);
     renderHud();
   };
 
@@ -1235,6 +1432,8 @@
 
   const stopMediaGateway = () => {
     stopStatsLoop();
+    try { state.clipboardSync?.stop(); } catch { /* already stopped */ }
+    state.clipboardSync = null;
     state.mediaGatewayGeneration += 1;
     try { state.mediaGateway?.close?.(1000, 'client stopped'); } catch { /* already closed */ }
     try { state.videoPipeline?.stop?.(); } catch { /* already stopped */ }
@@ -1287,9 +1486,33 @@
     return resumed;
   };
 
+  // A canvas handed to the media worker can't be drawn on (or handed over) again: each gateway gets a new one.
+  const freshVideoCanvas = () => {
+    const canvas = qs('#streamVideoCanvas');
+    if (!canvas?.dataset.transferred) return canvas;
+    const fresh = canvas.cloneNode(false);
+    for (const key of ['transferred', 'videoWidth', 'videoHeight']) delete fresh.dataset[key];
+    canvas.replaceWith(fresh);
+    return fresh;
+  };
+  // localStorage sunbridge.video-worker = "false" keeps video on the main thread (for comparing).
+  const videoWorkerAllowed = () => {
+    try { return localStorage.getItem('sunbridge.video-worker') !== 'false'; } catch { return true; }
+  };
+  // localStorage sunbridge.webrtc = "false" keeps media on the WebSocket (for comparing).
+  const webrtcAllowed = () => {
+    try { return localStorage.getItem('sunbridge.webrtc') !== 'false'; } catch { return true; }
+  };
+  // Size of the video being shown: the media worker reports it in data attributes.
+  const videoSizeOf = (canvas) => ({
+    width: Number(canvas?.dataset.videoWidth) || canvas?.width || 0,
+    height: Number(canvas?.dataset.videoHeight) || canvas?.height || 0,
+  });
+
   const startMediaGateway = (session) => {
     stopMediaGateway();
     const generation = state.mediaGatewayGeneration;
+    state.mediaTransportInfo = null;
     state.mediaGatewayState = bridge.isDemo ? 'demo' : 'waiting';
     state.videoDecoderState = bridge.isDemo ? 'demo' : 'waiting-keyframe';
     state.mediaGatewayError = null;
@@ -1301,53 +1524,82 @@
       return;
     }
     const mediaApi = window.SunbridgeMedia;
-    const canvas = qs('#streamVideoCanvas');
+    const canvas = freshVideoCanvas();
+    // Video decoded and drawn in a worker that also owns the media socket (media-worker.js), unless the browser
+    // can't: then here, on the main thread.
+    const useWorker = Boolean(canvas && mediaApi?.createWorkerSocket && typeof window.Worker === 'function'
+      && typeof canvas.transferControlToOffscreen === 'function' && !state.videoWorkerDisabled && videoWorkerAllowed());
+    const videoOptions = { videoCodec: session.videoCodec || 'h264', width: session.width, height: session.height, fps: session.fps };
+    const videoCallbacks = {
+      onStats: (stats) => {
+        if (generation !== state.mediaGatewayGeneration || !stats?.width) return;
+        canvas.dataset.videoWidth = stats.width;
+        canvas.dataset.videoHeight = stats.height;
+      },
+      onHardwareFallback: ({ codecFamily }) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        fallBackFromCodec(codecFamily, 'no-hardware');
+      },
+      onState: (next) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        // No WebCodecs in workers here (state "unsupported" without an error): decode on the main thread.
+        if (useWorker && next.state === 'unsupported' && !next.lastError) {
+          state.videoWorkerDisabled = true;
+          window.setTimeout(() => { if (generation === state.mediaGatewayGeneration) startMediaGateway(state.streamSession); }, 0);
+          return;
+        }
+        if ((next.state || next) === 'playing' && state.videoDecoderState !== 'playing') window.setTimeout(() => { void checkAdaptiveResize(); }, 1000);
+        state.videoDecoderState = next.state || next;
+        state.videoDecoderError = next.lastError || null;
+        queueStreamRender();
+      },
+      onFrame: (frame) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        if (frame?.waitingKeyframe) requestIdrFrame();
+      },
+      onError: (error) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        requestIdrFrame();
+        state.videoDecoderState = 'decode-error';
+        state.videoDecoderError = errorMessage(error);
+        queueStreamRender();
+      },
+    };
     if (!mediaApi || typeof mediaApi.createVideoPipeline !== 'function') {
       state.videoDecoderState = 'unsupported';
-    } else {
-      state.videoPipeline = mediaApi.createVideoPipeline(canvas, {
-        videoCodec: session.videoCodec || 'h264',
-        onState: (next) => {
-          if (generation !== state.mediaGatewayGeneration) return;
-          if ((next.state || next) === 'playing' && state.videoDecoderState !== 'playing') window.setTimeout(() => { void checkAdaptiveResize(); }, 1000);
-          state.videoDecoderState = next.state || next;
-          state.videoDecoderError = next.lastError || null;
-          queueStreamRender();
-        },
-        onFrame: (frame) => {
-          if (generation !== state.mediaGatewayGeneration) return;
-          if (frame?.waitingKeyframe) requestIdrFrame();
-        },
-        onError: (error) => {
-          if (generation !== state.mediaGatewayGeneration) return;
-          requestIdrFrame();
-          state.videoDecoderState = 'decode-error';
-          state.videoDecoderError = errorMessage(error);
-          queueStreamRender();
-        },
-      });
+    } else if (!useWorker) {
+      state.videoPipeline = mediaApi.createVideoPipeline(canvas, { ...videoOptions, ...videoCallbacks });
       state.videoDecoderState = state.videoPipeline.state;
     }
+    // With the media worker, audio too: a socket of its own (a video retransmission stall on one TCP
+    // connection no longer holds audio up), decoded there and handed straight to the worklet.
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    const workerAudio = useWorker && typeof mediaApi?.createWorkerAudioOutput === 'function' && typeof window.AudioWorkletNode === 'function'
+      && typeof window.MessageChannel === 'function' && Boolean(state.audioContext || AudioContextCtor);
+    const audioGroup = workerAudio ? Math.random().toString(36).slice(2, 12) : null;
+    const audioCallbacks = {
+      onState: (next) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        state.audioDecoderState = next.state || next;
+        state.audioDecoderError = next.lastError || null;
+        queueStreamRender();
+      },
+      onFrame: () => {},
+      onError: (error) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        state.audioDecoderState = 'decode-error';
+        state.audioDecoderError = errorMessage(error);
+        queueStreamRender();
+      },
+    };
+    const mainThreadAudio = () => mediaApi.createAudioPipeline({ audioContext: state.audioContext, workletUrl: 'audio-worklet.js', ...audioCallbacks });
     if (!mediaApi || typeof mediaApi.createAudioPipeline !== 'function') {
       state.audioDecoderState = 'unsupported';
     } else {
-      state.audioPipeline = mediaApi.createAudioPipeline({
-        audioContext: state.audioContext,
-        workletUrl: 'audio-worklet.js',
-        onState: (next) => {
-          if (generation !== state.mediaGatewayGeneration) return;
-          state.audioDecoderState = next.state || next;
-          state.audioDecoderError = next.lastError || null;
-          queueStreamRender();
-        },
-        onFrame: () => {},
-        onError: (error) => {
-          if (generation !== state.mediaGatewayGeneration) return;
-          state.audioDecoderState = 'decode-error';
-          state.audioDecoderError = errorMessage(error);
-          queueStreamRender();
-        },
-      });
+      if (workerAudio) {
+        try { state.audioPipeline = mediaApi.createWorkerAudioOutput({ audioContext: state.audioContext, workletUrl: 'audio-worklet.js', callbacks: { onState: audioCallbacks.onState } }); } catch { state.audioPipeline = null; }
+      }
+      state.audioPipeline ||= mainThreadAudio();
       state.audioDecoderState = state.audioPipeline.state;
     }
     if (!session?.id || typeof bridge.mediaGateway !== 'function') {
@@ -1359,6 +1611,18 @@
     startStatsLoop();
     state.mediaGateway = bridge.mediaGateway({
       sessionId: session.id,
+      video: useWorker ? {
+        canvas,
+        options: videoOptions,
+        audio: workerAudio ? { sessionId: session.id, group: audioGroup } : null,
+        subscribe: workerAudio ? { audio: false, group: audioGroup } : null,
+        webrtc: webrtcAllowed(),
+        callbacks: {
+          ...videoCallbacks,
+          onAudioStats: (stats) => { if (generation === state.mediaGatewayGeneration) state.audioPipeline?.decodeStats?.(stats); },
+          onTransport: (info) => { if (generation === state.mediaGatewayGeneration) { state.mediaTransportInfo = info; queueStreamRender(); } },
+        },
+      } : null,
       onOpen: (info) => {
         if (generation !== state.mediaGatewayGeneration) return;
         state.gatewayRetry = 0;
@@ -1376,13 +1640,16 @@
           queueStreamRender();
         } else if (message?.type === 'stats') {
           state.bridgeStats = message;
+          state.clipboardSync?.setCapability(message.clipboard);
+        } else if (message?.type === 'clipboard') {
+          void state.clipboardSync?.receive(message);
         } else if (message?.type === 'reconnecting') {
           state.reconnect = { source: 'host', attempt: message.attempt, max: message.maxAttempts, reason: message.reason };
           renderReconnect();
         } else if (message?.type === 'stream-reset') {
           // The bridge rebuilt the host connection (new RTP stream, new keyframe): start the decoders over.
           state.reconnect = null;
-          state.streamSession = { ...(state.streamSession || {}), width: message.width, height: message.height };
+          state.streamSession = { ...(state.streamSession || {}), width: message.width, height: message.height, videoCodec: message.videoCodec || state.streamSession?.videoCodec };
           renderReconnect();
           startMediaGateway(state.streamSession);
         } else if (message?.type === 'session-ended') {
@@ -1401,12 +1668,19 @@
           state.lastTermination = message.code;
         }
       },
-      onPacket: (packet) => {
+      onPacket: (packet, meta) => {
         if (generation !== state.mediaGatewayGeneration) return;
-        state.net.bytes += packet.byteLength || 0;
         state.net.packets += 1;
+        // From the media worker: the video was handled there, this is the audio; meta describes the whole
+        // message, timed when the worker received it.
+        if (meta) {
+          state.net.bytes += meta.bytes || 0;
+          if (meta.receivedAt != null) noteOneWayDelay(meta.receivedAt, meta.arrivedAt);
+        } else {
+          state.net.bytes += packet.byteLength || 0;
+        }
         // One message = one or more envelopes; parse each once and hand it to the pipeline it belongs to.
-        let first = true;
+        let first = !meta;
         try {
           mediaApi.forEachEnvelope(packet, (envelope) => {
             if (first) { first = false; noteOneWayDelay(envelope.receivedAt); }
@@ -1433,6 +1707,35 @@
         scheduleGatewayRetry();
       },
     });
+    state.clipboardSync = window.SunbridgeClipboard?.createClipboardSync({
+      isEnabled: () => localStorage.getItem('sunbridge.setting.clipboard-sync') !== 'false',
+      onNotice: (kind, content, error) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        if (kind === 'received') showToast(t('clipboard.received'), content.mime === 'text/plain' ? t('clipboard.receivedText', { count: content.data.length }) : t('clipboard.receivedImage'), 'success');
+        else if (kind === 'sent') showToast(t('clipboard.sent'), content.mime === 'text/plain' ? t('clipboard.receivedText', { count: content.data.length }) : t('clipboard.receivedImage'), 'success');
+        else if (kind === 'empty') showToast(t('clipboard.title'), t('clipboard.empty'), 'warning');
+        else if (kind === 'read-blocked') showToast(t('clipboard.title'), t('clipboard.readBlocked'), 'warning');
+        else if (kind === 'send-failed') showToast(t('clipboard.title'), errorMessage(error), 'warning');
+      },
+      onState: () => { if (generation === state.mediaGatewayGeneration) queueStreamRender(); },
+    }) || null;
+    if (useWorker) {
+      state.videoPipeline = state.mediaGateway?.videoPipeline || null;
+      state.videoDecoderState = state.videoPipeline ? state.videoPipeline.state : 'unsupported';
+    }
+    // Hand the worklet's port to the worker once the worklet is loaded; if it can't load, decode audio here
+    // (the worker then passes the audio envelopes on).
+    if (state.audioPipeline?.worker) {
+      const output = state.audioPipeline;
+      output.ready.then((port) => {
+        if (generation === state.mediaGatewayGeneration) state.mediaGateway?.workerControl?.attachAudio(port);
+      }).catch(() => {
+        if (generation !== state.mediaGatewayGeneration || state.audioPipeline !== output) return;
+        output.stop();
+        state.audioPipeline = mainThreadAudio();
+        state.audioDecoderState = state.audioPipeline.state;
+      });
+    }
     const inputApi = window.SunbridgeInput;
     if (inputApi && canvas) {
       state.inputController = inputApi.createInputController({
@@ -1514,34 +1817,106 @@
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     let width = rect.width * dpr;
     let height = rect.height * dpr;
-    const scale = Math.min(1, Math.sqrt(MAX_ADAPTIVE_PIXELS / Math.max(1, width * height)));
+    let scale = Math.min(1, Math.sqrt(MAX_ADAPTIVE_PIXELS / Math.max(1, width * height)));
+    // Within what the hardware decoder takes for this stream's codec (see fitToHardwareDecoder).
+    const limit = state.decoderLimit;
+    if (limit) {
+      const [longSide, shortSide] = width >= height ? [width, height] : [height, width];
+      scale = Math.min(scale, limit.width / longSide, limit.height / shortSide);
+    }
     width = Math.max(640, Math.round((width * scale) / 8) * 8);
     height = Math.max(360, Math.round((height * scale) / 2) * 2);
     return { width, height };
   };
-  // Video codecs this browser decodes, most bandwidth-efficient first. Hardware decoders win "auto": AV1 and HEVC
-  // need 30-50 % less bitrate than H.264 for the same picture; software AV1 is used only when chosen explicitly.
-  const CODEC_PROBES = { av1: 'av01.0.08M.08', hevc: 'hev1.1.6.L120.90', h264: 'avc1.640028' };
-  const probeDecoder = async (codec, hardwareAcceleration) => {
+  // Video codecs this browser decodes, most bandwidth-efficient first. "auto" takes AV1 or HEVC only with a
+  // hardware decoder (30-50 % less bitrate than H.264 for the same picture); without one, H.264, which the host
+  // can always encode and nearly every device decodes in hardware. Software AV1 / HEVC only when chosen explicitly.
+  // Probed at the stream's size and frame rate: a GPU that decodes 1080p AV1 may not do 4K.
+  // Luma samples per picture and per second for levels 4.0 .. 6.2 (identical in HEVC and AV1).
+  const CODEC_LEVELS = [
+    { pixels: 2228224, rate: 66846720, hevc: 120, av1: 8, avc: 0x28 },
+    { pixels: 2228224, rate: 133693440, hevc: 123, av1: 9, avc: 0x2a },
+    { pixels: 8912896, rate: 267386880, hevc: 150, av1: 12, avc: 0x32 },
+    { pixels: 8912896, rate: 534773760, hevc: 153, av1: 13, avc: 0x33 },
+    { pixels: 8912896, rate: 1069547520, hevc: 156, av1: 14, avc: 0x34 },
+    { pixels: 35651584, rate: 2139095040, hevc: 183, av1: 17, avc: 0x3d },
+    { pixels: 35651584, rate: 4278190080, hevc: 186, av1: 18, avc: 0x3e },
+  ];
+  const codecProbeString = (codec, width, height, fps) => {
+    const pixels = width * height;
+    const level = CODEC_LEVELS.find((entry) => pixels <= entry.pixels && pixels * fps <= entry.rate) || CODEC_LEVELS[CODEC_LEVELS.length - 1];
+    if (codec === 'av1') return 'av01.0.' + String(level.av1).padStart(2, '0') + 'M.08';
+    if (codec === 'hevc') return 'hev1.1.6.L' + level.hevc + '.90';
+    return 'avc1.6400' + level.avc.toString(16).padStart(2, '0');
+  };
+  const probeDecoder = async (codec, size, hardwareAcceleration) => {
     try {
-      return (await window.VideoDecoder?.isConfigSupported?.({ codec: CODEC_PROBES[codec], hardwareAcceleration }))?.supported === true;
+      const config = { codec: codecProbeString(codec, size.width, size.height, size.fps), codedWidth: size.width, codedHeight: size.height, hardwareAcceleration, optimizeForLatency: true };
+      return (await window.VideoDecoder?.isConfigSupported?.(config))?.supported === true;
     } catch {
       return false;
     }
   };
-  const decodableCodecs = async () => {
-    if (state.codecSupport) return state.codecSupport;
-    const [av1Hw, hevcHw, av1Any, hevcAny] = await Promise.all([probeDecoder('av1', 'prefer-hardware'), probeDecoder('hevc', 'prefer-hardware'), probeDecoder('av1', 'no-preference'), probeDecoder('hevc', 'no-preference')]);
-    state.codecSupport = { av1Hw, hevcHw, av1: av1Any, hevc: hevcAny };
-    return state.codecSupport;
+  const decodableCodecs = async (size = {}) => {
+    const probeSize = { width: Number(size.width) || 1920, height: Number(size.height) || 1080, fps: Number(size.fps) || 60 };
+    const key = probeSize.width + 'x' + probeSize.height + '@' + probeSize.fps;
+    state.codecSupport ||= {};
+    if (state.codecSupport[key]) return state.codecSupport[key];
+    const codecs = ['av1', 'hevc', 'h264'];
+    const [hardware, any] = await Promise.all(['prefer-hardware', 'no-preference'].map((mode) => Promise.all(codecs.map((codec) => probeDecoder(codec, probeSize, mode)))));
+    const support = { key };
+    codecs.forEach((codec, index) => { support[codec + 'Hw'] = hardware[index]; support[codec] = any[index]; });
+    state.codecSupport[key] = support;
+    return support;
   };
-  const preferredCodecs = async () => {
-    const support = await decodableCodecs();
+  const preferredCodecs = async (size) => {
+    const support = await decodableCodecs(size);
+    state.codecProbeKey = support.key;
     const choice = state.settings.codec || 'auto';
     if (choice === 'h264') return ['h264'];
     if (choice === 'av1') return support.av1 ? ['av1', 'h264'] : ['h264'];
     if (choice === 'hevc') return support.hevc ? ['hevc', 'h264'] : ['h264'];
-    return [support.av1Hw && 'av1', (support.hevcHw || support.hevc) && 'hevc', 'h264'].filter(Boolean);
+    return [support.av1Hw && 'av1', support.hevcHw && 'hevc', 'h264'].filter(Boolean);
+  };
+  // Like moonlight-web's DecoderLimit: the largest picture the hardware decoder takes for a codec, asked with
+  // prefer-hardware (without it browsers also say yes to sizes they then decode in software, or not at all).
+  const HARDWARE_PROBE_SIZES = [[3840, 2160], [2560, 1440], [1920, 1080], [1280, 720]];
+  const hardwareLimit = async (codec, fps) => {
+    for (const [width, height] of HARDWARE_PROBE_SIZES) {
+      if (await probeDecoder(codec, { width, height, fps }, 'prefer-hardware')) return { width, height };
+    }
+    return null;
+  };
+  // Auto resolution and codec: when no efficient codec the host encodes (AV1, HEVC) is hardware-decodable at
+  // the window's size but one is at a smaller size, stream at that size rather than fall back to H.264 or
+  // software decoding: the efficient codec saves more bandwidth than the extra pixels are worth, and a
+  // hardware decoder keeps decode time flat. Adaptive resizes later stay within the same limit.
+  const fitToHardwareDecoder = async (input, host) => {
+    state.decoderLimit = null;
+    if (!input.adaptive) return input;
+    const plan = { ...input, ...adaptiveSize() };
+    if ((state.settings.codec || 'auto') !== 'auto') return plan;
+    const efficient = ['av1', 'hevc'].filter((codec) => !Array.isArray(host?.codecs) || host.codecs.includes(codec));
+    const support = await decodableCodecs(plan);
+    if (!efficient.length || efficient.some((codec) => support[codec + 'Hw'])) return plan;
+    for (const codec of efficient) {
+      const limit = await hardwareLimit(codec, plan.fps);
+      if (!limit) continue;
+      state.decoderLimit = limit;
+      return { ...plan, ...adaptiveSize() };
+    }
+    return plan;
+  };
+  // Auto codec, and the browser can't keep up with AV1 / HEVC (no hardware decoder after all, or software
+  // decoding falls behind): ask the host for the next codec down. Never the bridge: it doesn't re-encode.
+  const fallBackFromCodec = (codec, reason) => {
+    if ((state.settings.codec || 'auto') !== 'auto' || codec === 'h264' || state.mediaGatewayState !== 'connected') return;
+    const support = state.codecSupport?.[state.codecProbeKey];
+    if (support) support[codec + 'Hw'] = false;
+    const order = ['av1', 'hevc', 'h264'];
+    const remaining = order.slice(order.indexOf(codec) + 1).filter((next) => next === 'h264' || support?.[next + 'Hw']);
+    state.codecFallback = { from: codec, reason };
+    state.mediaGateway?.send?.({ type: 'switch-codec', codecs: remaining });
   };
 
   const isDesktopApp = (app) => /desktop|桌面|remote|mstsc|rdp/i.test(String(app?.name || app || ''));
@@ -1637,8 +2012,8 @@
       if (state.stopping || !state.streamSession) return;
       const host = state.streamHost; const app = state.streamApp;
       const base = state.streamPlan || streamPlan(host, app);
-      const plan = base.adaptive ? { ...base, ...adaptiveSize() } : base;
-      const fresh = await bridge.launch({ hostId: host.id, address: host.address, hostName: host.name, appId: app.id, appName: app.name, width: plan.width, height: plan.height, fps: plan.fps, bitrateMode: plan.bitrateMode, videoCodecs: await preferredCodecs() });
+      const plan = await fitToHardwareDecoder(base, host);
+      const fresh = await bridge.launch({ hostId: host.id, address: host.address, hostName: host.name, appId: app.id, appName: app.name, width: plan.width, height: plan.height, fps: plan.fps, bitrateMode: plan.bitrateMode, videoCodecs: await preferredCodecs(plan), codecProbe: state.codecSupport?.[state.codecProbeKey], codecChoice: state.settings.codec || 'auto' });
       state.streamSession = fresh;
       startSessionEvents();
       startMediaGateway(fresh);
@@ -1706,7 +2081,8 @@
         state.resizeVerifyTimer = window.setTimeout(async () => {
           const canvas = qs('#streamVideoCanvas');
           if (!canvas || !state.streamSession || state.reconnect) return;
-          if (Math.abs(canvas.width - result.width) <= 16 && Math.abs(canvas.height - result.height) <= 16) return;
+          const shown = videoSizeOf(canvas);
+          if (Math.abs(shown.width - result.width) <= 16 && Math.abs(shown.height - result.height) <= 16) return;
           // The host ignored the live change (stock Sunshine): reconnect at the new size instead.
           try { await bridge.resize(result.width, result.height, 'reconnect'); } catch { /* keep the current size */ }
         }, 5000);
@@ -1777,13 +2153,13 @@
     state.selectedHost = host; state.streamHost = host; state.streamApp = app; state.streamSession = null;
     overlay.hidden = false; document.body.style.overflow = 'hidden'; document.body.classList.add('is-streaming'); renderStream('negotiating'); startSessionEvents(); startSessionPolling();
     // Plan after the overlay is visible: adaptive resolution measures the stream area.
-    const plan = streamPlan(host, app);
+    const plan = await fitToHardwareDecoder(streamPlan(host, app), host);
     state.streamPlan = plan;
     state.controlMode = plan.controlMode;
     applyControlModeUi();
     try {
-      const videoCodecs = await preferredCodecs();
-      const session = await bridge.launch({ hostId: host.id, address: host.address, hostName: host.name, appId: app.id, appName: app.name, width: plan.width, height: plan.height, fps: plan.fps, bitrateMode: plan.bitrateMode, videoCodecs });
+      const videoCodecs = await preferredCodecs(plan);
+      const session = await bridge.launch({ hostId: host.id, address: host.address, hostName: host.name, appId: app.id, appName: app.name, width: plan.width, height: plan.height, fps: plan.fps, bitrateMode: plan.bitrateMode, videoCodecs, codecProbe: state.codecSupport?.[state.codecProbeKey], codecChoice: state.settings.codec || 'auto' });
       state.streamSession = session;
       state.activeRemoteSession = null;
       startMediaGateway(session);
@@ -2032,6 +2408,7 @@
     if (action === 'toggle-control-mode') toggleControlMode();
     if (action === 'toggle-fullscreen') void toggleFullscreen();
     if (action === 'show-keyboard') showSoftKeyboard();
+    if (action === 'send-clipboard') void state.clipboardSync?.sendNow();
     if (action === 'resume-session' && state.activeRemoteSession) void resumeStream(state.activeRemoteSession);
     if (action === 'end-active-session') void (async () => { try { await bridge.stop(); } catch (error) { showToast(t('session.stopFailed'), errorMessage(error), 'warning'); } state.activeRemoteSession = null; renderResumeBar(); })();
     if (action === 'host-unpair') void handleHostUnpair(actionTarget);
@@ -2052,6 +2429,16 @@
   document.addEventListener('submit', (event) => { if (event.target.matches('#pairForm')) handlePairSubmit(event); if (event.target.matches('#hostForm')) void handleHostSave(event); });
   document.addEventListener('mousedown', (event) => { if (event.target.matches('#hostModal')) closeHostModal(); });
   document.addEventListener('click', (event) => { const toggle = event.target.closest('[data-toggle]'); if (toggle) toggleSetting(toggle); });
+  // Show the saved state of each switch (the markup only has the defaults).
+  qsa('[data-toggle]').forEach((toggle) => {
+    let saved = null;
+    try { saved = localStorage.getItem('sunbridge.setting.' + toggle.dataset.toggle); } catch { /* defaults */ }
+    if (saved !== 'true' && saved !== 'false') return;
+    const isOn = saved === 'true';
+    toggle.classList.toggle('is-on', isOn);
+    toggle.setAttribute('aria-pressed', String(isOn));
+    if (toggle.dataset.toggle === 'reduce-motion') document.documentElement.classList.toggle('reduce-motion', isOn);
+  });
   document.addEventListener('change', (event) => {
     const target = event.target;
     if (target.matches('#resolutionSelect')) {

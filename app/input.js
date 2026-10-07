@@ -57,8 +57,9 @@
   // Map a pointer position to host coordinates, honouring the canvas' object-fit: contain letterbox.
   function videoPoint(canvas, clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
-    const width = canvas.width || 1;
-    const height = canvas.height || 1;
+    // A canvas drawn by the media worker reports the video size in data attributes (its own width is fixed).
+    const width = Number(canvas.dataset.videoWidth) || canvas.width || 1;
+    const height = Number(canvas.dataset.videoHeight) || canvas.height || 1;
     const scale = Math.min(rect.width / width, rect.height / height) || 1;
     const drawnWidth = width * scale;
     const drawnHeight = height * scale;
