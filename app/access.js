@@ -1,10 +1,11 @@
-// Settings → Access (entrypoints, allowed addresses, certificates, nginx helper) and the Logs page.
+// Settings → Access (entrypoints, allowed addresses, certificates, nginx helper), the Logs page, and the
+// Sunbridge service card on the settings page (version, updates, restart).
 // Network changes are applied by the bridge right away and reverted after 60 seconds unless confirmed from a
 // working address; the confirmation banner shows on every page while a change is pending.
 (function () {
   'use strict';
   const t = (key, params) => (window.t ? window.t(key, params) : key);
-  const state = { network: null, certs: null, draft: null, logs: [], logFilter: { category: '', warnOnly: false }, pendingTimer: null, logTimer: null, nginx: '' };
+  const state = { update: null, updateChecking: false, updateError: '', network: null, certs: null, draft: null, logs: [], logFilter: { category: '', warnOnly: false }, pendingTimer: null, logTimer: null, nginx: '' };
   const isDemo = () => Boolean(window.sunbridgeClient?.isDemo);
 
   const h = (tag, attrs = {}, ...children) => {
@@ -346,39 +347,107 @@
       output);
   }
 
-  // ----- restart -------------------------------------------------------------------------------------
-  // Restarts the bridge process (the stream on the host keeps running and resumes), then reloads this page
-  // once the bridge answers again.
-  async function restartBridge(output) {
-    const password = await askPassword(t('access.restartTitle'), t('access.restartCopy'));
-    if (password == null) return;
-    output.textContent = '';
-    try {
-      await call('/api/settings/restart', { password });
-    } catch (error) {
-      output.textContent = error.message;
-      return;
-    }
-    output.textContent = t('access.restarting');
+  // ----- Settings → Sunbridge service: version, updates, restart (update.mjs) --------------------------
+  // Restarting (or updating, which restarts) keeps the stream on the host running; this page reloads once the
+  // bridge answers again.
+  function reloadWhenBack(output, message) {
+    output.textContent = message;
     const startedAt = Date.now();
     const poll = async () => {
       try {
         const response = await fetch('/api/auth/status', { cache: 'no-store' });
         if (response.ok) { window.location.reload(); return; }
       } catch { /* still down */ }
-      if (Date.now() - startedAt > 60000) { output.textContent = t('access.restartSlow'); return; }
+      if (Date.now() - startedAt > 90000) { output.textContent = t('access.restartSlow'); return; }
       setTimeout(poll, 1000);
     };
     // Give the old process time to close its ports first.
     setTimeout(poll, 2500);
   }
 
-  function serviceCard() {
+  async function restartBridge(output) {
+    const password = await askPassword(t('access.restartTitle'), t('access.restartCopy'));
+    if (password == null) return;
+    output.textContent = '';
+    try { await call('/api/settings/restart', { password }); } catch (error) { output.textContent = error.message; return; }
+    reloadWhenBack(output, t('access.restarting'));
+  }
+
+  async function applyUpdate(output) {
+    const password = await askPassword(t('service.updateTitle'), t('service.updateCopy'));
+    if (password == null) return;
+    output.textContent = t('service.updating');
+    try {
+      const result = await call('/api/settings/update', { password });
+      reloadWhenBack(output, t(result.dependencies ? 'service.updatedDeps' : 'service.updated'));
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  }
+
+  const CHECK_EVERY_MS = 6 * 3600 * 1000;
+  const short = (hash) => String(hash || '').slice(0, 7);
+
+  async function checkUpdates({ quiet = false } = {}) {
+    state.updateChecking = true;
+    state.updateError = '';
+    renderService();
+    try { state.update = await call('/api/settings/update?check=1'); } catch (error) { if (!quiet) state.updateError = error.message; }
+    state.updateChecking = false;
+    renderService();
+  }
+
+  async function refreshService() {
+    if (isDemo()) { document.getElementById('serviceView')?.replaceChildren(); return; }
+    try { state.update = await call('/api/settings/update'); } catch (error) { state.updateError = error.message; }
+    renderService();
+    const last = Date.parse(state.update?.checkedAt || '') || 0;
+    if (state.update && !state.updateChecking && Date.now() - last > CHECK_EVERY_MS) void checkUpdates({ quiet: true });
+  }
+
+  function updateSummary(info) {
+    if (!info.checkedAt) return { text: t('service.notChecked') };
+    const count = info.behind;
+    switch (info.state) {
+      case 'up-to-date': return { text: t('service.upToDate'), tone: 'ok' };
+      case 'ahead': return { text: t('service.ahead', { count: info.ahead }), tone: 'ok' };
+      case 'available': return { text: t('service.available', { count }), tone: 'new' };
+      case 'dirty': return { text: t('service.dirty', { count, files: info.changedFiles.slice(0, 3).join(', ') }), tone: 'warn' };
+      case 'diverged': return { text: t('service.diverged', { count, ahead: info.ahead }), tone: 'warn' };
+      case 'no-upstream': return { text: t('service.noUpstream', { branch: info.branch }), tone: 'warn' };
+      case 'manual': return { text: t('service.manual', { date: fmtDate(info.commits[0]?.date), subject: info.commits[0]?.subject || '' }), tone: 'warn' };
+      default: return { text: '' };
+    }
+  }
+
+  function renderService() {
+    const view = document.getElementById('serviceView');
+    if (!view) return;
+    const info = state.update;
     const output = h('p', { class: 'security-message', role: 'status' });
-    return card(t('access.serviceTitle'), t('access.serviceCaption'),
-      h('p', { class: 'modal-copy', text: t('access.restartHint') }),
-      h('div', { class: 'dialog-actions' }, h('button', { class: 'secondary-button', type: 'button', text: t('access.restart'), onclick: () => void restartBridge(output) })),
-      output);
+    const installed = !info ? '' : info.kind === 'git'
+      ? t('service.versionGit', { version: info.version, commit: short(info.commit?.hash), date: fmtDate(info.commit?.date), branch: info.branch })
+      : t('service.versionArchive', { version: info.version });
+    const summary = info ? updateSummary(info) : { text: '' };
+    const commits = info?.state === 'available' || info?.state === 'dirty' || info?.state === 'diverged' ? info.commits : [];
+    const canUpdate = info?.state === 'available';
+    // Two rows like the other settings cards: version and updates, then restart.
+    const updateRow = h('div', { class: 'setting-row service-row' },
+      h('span', {},
+        h('strong', { text: installed }),
+        summary.text ? h('small', { class: summary.tone === 'warn' ? 'service-warn' : summary.tone === 'new' ? 'service-new' : null, text: summary.text }) : null,
+        info?.checkedAt ? h('small', { text: t('service.checkedAt', { time: fmtTime(info.checkedAt) }) }) : null,
+        state.updateError ? h('small', { class: 'service-warn', text: state.updateError }) : null,
+        commits.length ? h('ul', { class: 'update-commits' }, commits.map((commit) => h('li', {}, h('code', { text: short(commit.hash) }), h('span', { text: commit.subject }), h('small', { text: fmtDate(commit.date) })))) : null,
+        info?.state === 'manual' ? h('small', {}, h('a', { href: info.download, target: '_blank', rel: 'noopener', text: t('service.download') }), ' · ', h('a', { href: info.repository, target: '_blank', rel: 'noopener', text: 'GitHub' })) : null),
+      h('div', { class: 'service-actions' },
+        h('button', { class: 'secondary-button', type: 'button', disabled: state.updateChecking || !info, text: t(state.updateChecking ? 'service.checking' : 'service.check'), onclick: () => void checkUpdates() }),
+        canUpdate ? h('button', { class: 'primary-button', type: 'button', text: t('service.update'), onclick: () => void applyUpdate(output) }) : null));
+    const restartRow = h('div', { class: 'setting-row service-row' },
+      h('span', {}, h('strong', { text: t('access.restart') }), h('small', { text: t('access.restartHint') })),
+      h('div', { class: 'service-actions' }, h('button', { class: 'secondary-button', type: 'button', text: t('access.restart'), onclick: () => void restartBridge(output) })));
+    view.replaceChildren(h('div', { class: 'settings-layout' }, card(t('service.title'), t('service.caption'), updateRow, restartRow, output)));
+    icons(view);
   }
 
   // background: a refresh nobody asked for; skipped while the user is typing in the form.
@@ -386,7 +455,7 @@
     const view = document.getElementById('accessView');
     if (!view || !state.network) return;
     if (background && state.typing) return;
-    view.replaceChildren(h('div', { class: 'settings-layout' }, currentCard(), entrypointsCard(), hostsCard(), saveBar(), certificatesCard(), nginxCard(), webrtcCard(), serviceCard()));
+    view.replaceChildren(h('div', { class: 'settings-layout' }, currentCard(), entrypointsCard(), hostsCard(), saveBar(), certificatesCard(), nginxCard(), webrtcCard()));
     icons(view);
   }
 
@@ -437,6 +506,7 @@
     currentView = event.detail.view;
     clearInterval(state.logTimer);
     if (currentView === 'access') void refreshView();
+    if (currentView === 'settings') void refreshService();
     if (currentView === 'logs') {
       void refreshLogs();
       state.logTimer = setInterval(() => { if (!document.hidden) void refreshLogs(); }, 10000);
@@ -445,7 +515,7 @@
   // Typing in a field must not be interrupted by a re-render.
   document.addEventListener('focusin', (event) => { state.typing = Boolean(event.target.closest?.('#accessView')); });
   document.addEventListener('focusout', () => { state.typing = false; });
-  window.addEventListener('sunbridge:locale', () => { if (currentView === 'access') render({ background: true }); if (currentView === 'logs') renderLogs(); renderPendingBanner(); });
+  window.addEventListener('sunbridge:locale', () => { if (currentView === 'access') render({ background: true }); if (currentView === 'logs') renderLogs(); if (currentView === 'settings') renderService(); renderPendingBanner(); });
   window.addEventListener('beforeunload', (event) => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });
 
   // A change may be pending from another tab or address: check once on load.

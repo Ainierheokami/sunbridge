@@ -260,6 +260,8 @@ async function start() {
     code = runNode(['server.mjs'], { ...process.env, SUNBRIDGE_SUPERVISOR: 'manage' });
     if (code !== RESTART_EXIT_CODE) break;
     console.log(dim('\nSunbridge 正在重启…\n'));
+    // An update from the web page may have brought new dependencies.
+    ensureDependencies();
   }
   console.log(dim('\nSunbridge 已停止。'));
   return code;

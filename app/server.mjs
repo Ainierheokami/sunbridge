@@ -15,6 +15,7 @@ import { createAuth } from './auth.mjs';
 import { createLog, LOG_CATEGORIES } from './log.mjs';
 import { rtcSupport, answerOffer, fragmentFrame } from './webrtc.mjs';
 import * as Clipboard from './clipboard.mjs';
+import { createUpdater } from './update.mjs';
 import {
   loadConfig as loadNetConfig, saveConfig as saveNetConfig, validateConfig, environmentEntrypoint, makeAddressMatcher, isLoopbackAddress,
   hostAllowed, scanCertificates, pickCertificate, storeCertificate, deleteCertificate, nginxSnippet,
@@ -40,7 +41,8 @@ if (ENV_ENTRYPOINT) netConfig = { ...netConfig, entrypoints: [ENV_ENTRYPOINT] };
 const ENV_CERTIFICATES = process.env.SUNBRIDGE_TLS_CERT && process.env.SUNBRIDGE_TLS_KEY ? [{ cert: process.env.SUNBRIDGE_TLS_CERT, key: process.env.SUNBRIDGE_TLS_KEY }] : [];
 const EXTRA_ORIGINS = envList(process.env.SUNBRIDGE_ALLOWED_ORIGINS) || netConfig.allowedOrigins;
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/theme.js', '/assets/sunbridge-icon.svg', '/favicon.ico']);
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
+const updater = createUpdater({ appDir: ROOT, version: VERSION });
 const DEFAULT_HTTP_PORT = 47989;
 const DEFAULT_HTTPS_PORT = 47984;
 const REQUEST_TIMEOUT_MS = 7000;
@@ -906,7 +908,7 @@ function requestHost(host, endpoint, params = {}, options = {}) {
       // Sunshine closes the connection after each response; reusing a pooled socket races that close.
       agent: false,
       headers: {
-        Accept: 'application/xml, text/xml, */*', 'User-Agent': 'Sunbridge/0.2', Connection: 'close',
+        Accept: 'application/xml, text/xml, */*', 'User-Agent': 'Sunbridge/0.3', Connection: 'close',
         ...(options.body ? { 'Content-Type': 'application/octet-stream', 'Content-Length': options.body.length } : {}),
         ...(options.headers || {}),
       },
@@ -3226,6 +3228,9 @@ async function sendClipboardToHost(session, mime, data) {
   return { kind: frameKind === Clipboard.KIND.REF ? 'blob' : 'inline', bytes: data.length };
 }
 
+const SPEEDTEST_MAX_BYTES = 64 * 1024 * 1024;
+const speedtestChunk = crypto.randomBytes(256 * 1024);
+
 async function readRawBody(request, limit) {
   const chunks = [];
   let size = 0;
@@ -3558,7 +3563,7 @@ async function handleApi(request, response, pathname) {
     return;
   }
   // The clipboard upload is raw bytes, read after the login check below.
-  const body = request.method === 'POST' && pathname !== '/api/bridge/clipboard' ? await readBody(request) : {};
+  const body = request.method === 'POST' && pathname !== '/api/bridge/clipboard' && pathname !== '/api/bridge/speedtest' ? await readBody(request) : {};
   if (pathname === '/api/auth/status' && request.method === 'GET') {
     jsonResponse(response, 200, { ok: true, ...auth.status(request) });
     return;
@@ -3782,6 +3787,33 @@ async function handleApi(request, response, pathname) {
     response.end(item.data);
     return;
   }
+  // Throughput between this browser and the bridge (the interaction test): download a stream of bytes, or
+  // upload one and get back how many arrived. Incompressible, so a proxy's gzip can't flatter it.
+  if (pathname === '/api/bridge/speedtest' && request.method === 'GET') {
+    const bytes = Math.min(SPEEDTEST_MAX_BYTES, Math.max(1024, Number(new URL(request.url || '/', 'http://localhost').searchParams.get('bytes')) || 0));
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes, 'Cache-Control': 'no-store', 'Content-Encoding': 'identity' });
+    let left = bytes;
+    const pump = () => {
+      while (left > 0) {
+        const chunk = speedtestChunk.subarray(0, Math.min(left, speedtestChunk.length));
+        left -= chunk.length;
+        if (!response.write(chunk)) { response.once('drain', pump); return; }
+      }
+      response.end();
+    };
+    pump();
+    return;
+  }
+  if (pathname === '/api/bridge/speedtest' && request.method === 'POST') {
+    const started = process.hrtime.bigint();
+    let bytes = 0;
+    for await (const chunk of request) {
+      bytes += chunk.length;
+      if (bytes > SPEEDTEST_MAX_BYTES) throw bridgeError('请求体过大', 'BRIDGE_ERROR', { statusCode: 413 });
+    }
+    jsonResponse(response, 200, { ok: true, bytes, serverMs: Number(process.hrtime.bigint() - started) / 1e6 });
+    return;
+  }
   if (pathname === '/api/bridge/stop' && request.method === 'POST') {
     const result = await stopSession();
     if (result?.session) LOG.info('stream', 'stop', `结束串流：${result.session.appName || ''} · ${result.session.hostName || ''}`, requestFields(request));
@@ -3793,7 +3825,7 @@ async function handleApi(request, response, pathname) {
 
 // Only the web client itself is served. Everything else in this directory (data with the pairing
 // key, password hashes and TLS keys, certs/, scripts, tests, backups, server sources) must never be readable.
-const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/favicon.ico']);
+const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/testbench.js', '/favicon.ico']);
 const isServableStatic = (requestedPath) => STATIC_FILES.has(requestedPath) || /^\/assets\/[\w.-]+\.(png|jpe?g|svg|webp|ico)$/i.test(requestedPath);
 
 function serveStatic(request, response, pathname) {
@@ -3946,6 +3978,17 @@ async function handleSettingsApi(request, response, pathname, body) {
     response.end(certStore.selfSigned.cert);
     return;
   }
+  // Version and updates (update.mjs). GET /api/settings/update is what is installed and the last check;
+  // ?check=1 asks the upstream (git fetch, or GitHub for an archive install).
+  if (pathname === '/api/settings/update' && request.method === 'GET') {
+    try {
+      const check = new URL(request.url, 'http://localhost').searchParams.get('check') === '1';
+      jsonResponse(response, 200, { ok: true, ...(check ? await updater.check() : await updater.status()) });
+    } catch (error) {
+      jsonResponse(response, 502, { ok: false, errorCode: error.code || 'UPDATE_CHECK_FAILED', error: error.message });
+    }
+    return;
+  }
   // Everything below changes how the bridge can be reached: re-enter the password.
   if (request.method !== 'POST') { jsonResponse(response, 404, { ok: false, errorCode: 'BRIDGE_ERROR', error: 'API 路径不存在' }); return; }
   const check = await auth.verifyPassword(request, body.password);
@@ -3990,6 +4033,19 @@ async function handleSettingsApi(request, response, pathname, body) {
     LOG.info('system', 'restart-requested', '从网页重启 Sunbridge', fields);
     jsonResponse(response, 200, { ok: true });
     // After the response is out.
+    setTimeout(() => shutdown({ restart: true }), 300);
+    return;
+  }
+  if (pathname === '/api/settings/update') {
+    let result;
+    try {
+      result = await updater.apply();
+    } catch (error) {
+      jsonResponse(response, error.code === 'UPDATE_BUSY' ? 409 : 400, { ok: false, errorCode: error.code || 'UPDATE_FAILED', error: error.message });
+      return;
+    }
+    LOG.info('system', 'updated', `已更新 Sunbridge：${result.from.slice(0, 7)} → ${result.to.slice(0, 7)}（${result.commits} 个提交${result.dependencies ? '，依赖有变化' : ''}），正在重启`, fields);
+    jsonResponse(response, 200, { ok: true, ...result });
     setTimeout(() => shutdown({ restart: true }), 300);
     return;
   }

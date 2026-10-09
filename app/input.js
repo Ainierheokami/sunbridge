@@ -13,6 +13,8 @@
     ShiftLeft: 0xa0, ShiftRight: 0xa1, ControlLeft: 0xa2, ControlRight: 0xa3, AltLeft: 0xa4, AltRight: 0xa5,
     Semicolon: 0xba, Equal: 0xbb, Comma: 0xbc, Minus: 0xbd, Period: 0xbe, Slash: 0xbf, Backquote: 0xc0,
     BracketLeft: 0xdb, Backslash: 0xdc, BracketRight: 0xdd, Quote: 0xde, IntlBackslash: 0xe2,
+    // IME keys (Korean Hangul/Hanja, Japanese Kana/Henkan/Muhenkan) so the host's input method gets them.
+    Lang1: 0x15, Lang2: 0x19, KanaMode: 0x15, Convert: 0x1c, NonConvert: 0x1d, IntlRo: 0xc1, IntlYen: 0xdc,
     AudioVolumeMute: 0xad, AudioVolumeDown: 0xae, AudioVolumeUp: 0xaf, MediaTrackNext: 0xb0, MediaTrackPrevious: 0xb1, MediaStop: 0xb2, MediaPlayPause: 0xb3,
   };
   for (let i = 0; i < 26; i += 1) VK['Key' + String.fromCharCode(65 + i)] = 0x41 + i;
@@ -73,7 +75,18 @@
 
   // Modes: 'game' locks the pointer on click and sends relative motion (the classic GameStream behaviour);
   // 'desktop' never locks it: absolute positions, local cursor, touch gestures and a soft keyboard.
-  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', textInput = null } = {}) {
+  const isEditable = (element) => Boolean(element && (element.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName)));
+
+  // Keyboard input goes two ways:
+  //   - raw keys (the default): physical keys as virtual-key codes, and the host's own input method composes
+  //     text. Focus sits on the canvas, which is not editable, so this device's input method stays out of it
+  //     (an editable element left focused - a form field behind the stream, the soft keyboard's textarea -
+  //     would have both input methods compose the same keys);
+  //   - text (the soft keyboard's textarea is focused): this device's input method composes and the committed
+  //     text is sent as Unicode; only keys that don't type (Enter, arrows, shortcuts) go as raw keys.
+  // beforePaste(): called on Ctrl/Cmd+V; while the promise it returns is pending, the keystroke is held back so
+  // the host pastes this device's clipboard (clipboard sync) rather than its own old content.
+  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', textInput = null, beforePaste = null } = {}) {
     if (!canvas || typeof send !== 'function') throw new TypeError('createInputController needs a canvas and a send function');
     const pressedKeys = new Map(); // code -> vk
     const pressedButtons = new Set();
@@ -88,6 +101,7 @@
     let hwheelRemainder = 0;
     let gamepadFrame = null;
     let stopped = false;
+    let held = null; // events held back while a paste waits for the clipboard to reach the host
     const stats = { events: 0, pointerLocked: false, gamepads: 0 };
 
     const on = (target, type, handler, options) => {
@@ -119,6 +133,7 @@
     // Discrete events (keys/buttons) go out in the same task; motion is coalesced to one message per task.
     const push = (event) => {
       if (!active()) return;
+      if (held) { held.push(event); return; }
       queue.push(event);
       schedule();
     };
@@ -128,7 +143,30 @@
       queueMicrotask(flush);
     };
 
+    const holdUntil = (promise, timeoutMs = 3000) => {
+      held = held || [];
+      let timer = null;
+      const release = () => {
+        clearTimeout(timer);
+        if (!held) return;
+        const events = held;
+        held = null;
+        events.forEach(push);
+      };
+      timer = setTimeout(release, timeoutMs);
+      Promise.resolve(promise).catch(() => {}).then(release);
+    };
+
+    // Take focus off editable elements (see the note above createInputController).
+    const focusCanvas = () => {
+      if (document.activeElement === canvas) return;
+      if (canvas.tabIndex < 0 && !canvas.hasAttribute('tabindex')) canvas.tabIndex = -1;
+      try { canvas.focus({ preventScroll: true }); } catch { /* not focusable */ }
+    };
+    if (isEditable(document.activeElement) && document.activeElement !== textInput) focusCanvas();
+
     const releaseAll = () => {
+      held = null; // what it held is released below as key / button ups
       for (const [code, vk] of pressedKeys) queue.push({ kind: 'key', keyCode: vk, down: false, modifiers: 0, code });
       pressedKeys.clear();
       for (const button of pressedButtons) queue.push({ kind: 'mouse-button', button, down: false });
@@ -155,7 +193,24 @@
       }
       const vk = VK[event.code];
       if (!vk) return;
-      event.preventDefault();
+      if (event.target === textInput && textInput) {
+        // This device's input method is composing, or the key types a character: the text arrives through the
+        // textarea's input / composition events instead.
+        if (event.isComposing || event.keyCode === 229 || event.key === 'Process') return;
+        const typesText = event.key.length === 1 && ((!event.ctrlKey && !event.metaKey && !event.altKey) || event.getModifierState?.('AltGraph'));
+        if (typesText) return;
+      } else if (isEditable(event.target)) {
+        focusCanvas();
+      }
+      // Ctrl/Cmd+V: let the browser's paste event through (it carries this device's clipboard) and hold the
+      // keystroke until clipboard sync has put that content on the host.
+      if (beforePaste && event.code === 'KeyV' && (event.ctrlKey || event.metaKey) && !event.altKey && !event.repeat && event.target !== textInput) {
+        const pending = beforePaste();
+        if (pending) holdUntil(pending);
+        else event.preventDefault();
+      } else {
+        event.preventDefault();
+      }
       if (event.repeat && pressedKeys.has(event.code)) {
         push({ kind: 'key', keyCode: vk, down: true, modifiers: modifiersOf(event) });
         return;
@@ -167,6 +222,7 @@
       if (!active()) return;
       const vk = VK[event.code];
       if (!vk) return;
+      if (!pressedKeys.has(event.code)) return; // its keydown went to the textarea as text, or came before the stream
       event.preventDefault();
       pressedKeys.delete(event.code);
       push({ kind: 'key', keyCode: vk, down: false, modifiers: modifiersOf(event) });
@@ -186,14 +242,14 @@
     };
     on(document, 'pointerlockchange', () => {
       stats.pointerLocked = pointerLocked();
-      if (stats.pointerLocked) navigator.keyboard?.lock?.().catch?.(() => {});
-      else if (!document.fullscreenElement) navigator.keyboard?.unlock?.();
       notify();
     });
     on(canvas, 'pointerdown', (event) => {
       if (!active()) return;
       if (event.pointerType === 'touch' && desktopMode()) return; // handled by the touch gestures below
       event.preventDefault();
+      // A mouse click puts the keyboard back on raw keys (and closes any input method on this device).
+      if (event.pointerType !== 'touch') focusCanvas();
       if (!pointerLocked() && !desktopMode() && shouldCapturePointer()) requestCapture();
       if (!pointerLocked()) {
         const point = videoPoint(canvas, event.clientX, event.clientY);
@@ -223,6 +279,12 @@
         pendingDy += event.movementY || 0;
       } else if (event.target === canvas || pressedButtons.size) {
         const point = videoPoint(canvas, event.clientX, event.clientY);
+        // The host draws its own cursor into the video; the local one is hidden over the picture (styles.css)
+        // and shown again over the letterbox bars.
+        if (event.target === canvas) {
+          if (point) delete canvas.dataset.pointerOutside;
+          else canvas.dataset.pointerOutside = '';
+        }
         if (!point) return;
         pendingAbs = point;
       } else {
@@ -349,8 +411,18 @@
       push({ kind: 'key', keyCode: vk, down: false, modifiers: 0 });
     };
     if (textInput) {
+      // Composed text (CJK input methods, and words on Android keyboards) is sent once, when committed.
+      let composing = false;
+      on(textInput, 'compositionstart', () => { composing = true; });
+      on(textInput, 'compositionend', (event) => {
+        composing = false;
+        if (active() && event.data) sendText(event.data);
+        textInput.value = '';
+      });
       on(textInput, 'input', (event) => {
         if (!active()) return;
+        if (composing || event.isComposing) return;
+        if (/Composition/.test(event.inputType || '')) { textInput.value = ''; return; } // committed in compositionend
         if (event.inputType === 'deleteContentBackward') tapKey(VK.Backspace);
         else if (event.inputType === 'insertLineBreak') tapKey(VK.Enter);
         else if (event.data) sendText(event.data);
@@ -452,7 +524,8 @@
         if (gamepadFrame) cancelAnimationFrame(gamepadFrame);
         gamepadFrame = null;
         if (pointerLocked()) document.exitPointerLock?.();
-        navigator.keyboard?.unlock?.();
+        // A controller also stops when the stream reconnects (resize, codec switch): the fullscreen's lock stays.
+        if (!document.fullscreenElement) navigator.keyboard?.unlock?.();
         listeners.splice(0).forEach((off) => off());
       },
     };

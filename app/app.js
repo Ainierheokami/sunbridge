@@ -322,6 +322,7 @@
     const settingText = [
       ['[data-toggle="match-display"]', 'settings.matchDisplay', 'settings.matchDisplayHint'],
       ['[data-toggle="capture-pointer"]', 'settings.capturePointer', 'settings.capturePointerHint'],
+      ['[data-toggle="local-cursor"]', 'settings.localCursor', 'settings.localCursorHint'],
       ['[data-toggle="show-telemetry"]', 'settings.telemetry', 'settings.telemetryHint'],
       ['[data-toggle="ask-launch"]', 'settings.askLaunch', 'settings.askLaunchHint'],
       ['[data-toggle="reduce-motion"]', 'settings.reduceMotion', 'settings.reduceMotionHint'],
@@ -1017,7 +1018,7 @@
         });
       } catch { /* the target is shown instead */ }
       const rtt = Math.round(rtts[Math.floor(rtts.length / 2)]);
-      return { status: rtt > 150 ? 'warn' : 'ok', detail: t('diag.detail.webrtcOk', { path, connect: connectMs, rtt }), elapsedMs: connectMs };
+      return { status: rtt > 150 ? 'warn' : 'ok', detail: t('diag.detail.webrtcOk', { path, connect: connectMs, rtt }), elapsedMs: connectMs, rtt, path };
     } catch {
       return { status: 'fail', detail: t('diag.detail.webrtcFail', { target: target ? `${target.host}:${target.port}` : '—' }) };
     } finally {
@@ -1651,6 +1652,7 @@
           state.reconnect = null;
           state.streamSession = { ...(state.streamSession || {}), width: message.width, height: message.height, videoCodec: message.videoCodec || state.streamSession?.videoCodec };
           renderReconnect();
+          renderResolutionButton();
           startMediaGateway(state.streamSession);
         } else if (message?.type === 'session-ended') {
           endStreamLocally(endedReasonKey(message.errorCode));
@@ -1709,13 +1711,15 @@
     });
     state.clipboardSync = window.SunbridgeClipboard?.createClipboardSync({
       isEnabled: () => localStorage.getItem('sunbridge.setting.clipboard-sync') !== 'false',
-      onNotice: (kind, content, error) => {
+      onNotice: (kind, content, error, file) => {
         if (generation !== state.mediaGatewayGeneration) return;
         if (kind === 'received') showToast(t('clipboard.received'), content.mime === 'text/plain' ? t('clipboard.receivedText', { count: content.data.length }) : t('clipboard.receivedImage'), 'success');
         else if (kind === 'sent') showToast(t('clipboard.sent'), content.mime === 'text/plain' ? t('clipboard.receivedText', { count: content.data.length }) : t('clipboard.receivedImage'), 'success');
         else if (kind === 'empty') showToast(t('clipboard.title'), t('clipboard.empty'), 'warning');
         else if (kind === 'read-blocked') showToast(t('clipboard.title'), t('clipboard.readBlocked'), 'warning');
         else if (kind === 'send-failed') showToast(t('clipboard.title'), errorMessage(error), 'warning');
+        else if (kind === 'dropped') showToast(t('clipboard.sent'), t('clipboard.dropped'), 'success');
+        else if (kind === 'file-unsupported') showToast(t('clipboard.title'), t('clipboard.fileUnsupported', { name: file?.name || '' }), 'warning');
       },
       onState: () => { if (generation === state.mediaGatewayGeneration) queueStreamRender(); },
     }) || null;
@@ -1741,12 +1745,13 @@
       state.inputController = inputApi.createInputController({
         canvas,
         send: (message) => state.mediaGateway?.send?.(message),
-        isEnabled: () => generation === state.mediaGatewayGeneration && !state.stopping && !qs('#streamOverlay')?.hidden && inputConnected(),
+        isEnabled: () => generation === state.mediaGatewayGeneration && !state.stopping && !qs('#streamOverlay')?.hidden && !qs('#settingsDrawer')?.classList.contains('is-open') && inputConnected(),
         shouldCapturePointer: () => localStorage.getItem('sunbridge.setting.capture-pointer') !== 'false',
         onStateChange: () => queueStreamRender(),
         onQuit: () => { void stopStream(); },
         getMode: () => state.controlMode || 'game',
         textInput: qs('#streamKeyboardInput'),
+        beforePaste: () => state.clipboardSync?.beforePaste() ?? null,
       });
     }
     queueStreamRender();
@@ -1946,6 +1951,28 @@
       hydrateIcons(fullscreen);
     }
     const keyboard = qs('#streamKeyboardButton'); if (keyboard) keyboard.title = t('control.keyboard');
+    renderResolutionButton();
+  };
+  // Adaptive streams: follow the window, or keep the current resolution (a window being dragged around
+  // would otherwise make the host switch modes again and again).
+  const followsWindow = () => state.settings.followWindow !== false;
+  const renderResolutionButton = () => {
+    const button = qs('#streamResolutionButton'); if (!button) return;
+    button.hidden = !state.streamPlan?.adaptive;
+    const session = state.streamSession;
+    const size = session?.width ? session.width + '×' + session.height : '—';
+    const follow = followsWindow();
+    button.innerHTML = '<span data-icon="' + (follow ? 'expand' : 'lock') + '" aria-hidden="true"></span><span>' + esc(t(follow ? 'control.resolutionAuto' : 'control.resolutionFixed', { size })) + '</span>';
+    button.title = t(follow ? 'control.resolutionAutoHint' : 'control.resolutionFixedHint');
+    button.setAttribute('aria-pressed', String(follow));
+    hydrateIcons(button);
+  };
+  const toggleFollowWindow = () => {
+    state.settings.followWindow = !followsWindow();
+    saveSettings();
+    renderResolutionButton();
+    showToast(t(followsWindow() ? 'control.resolutionAutoOn' : 'control.resolutionAutoOff'), t(followsWindow() ? 'control.resolutionAutoHint' : 'control.resolutionFixedHint'));
+    if (followsWindow()) void checkAdaptiveResize();
   };
   const toggleControlMode = () => {
     state.controlMode = state.controlMode === 'desktop' ? 'game' : 'desktop';
@@ -1953,11 +1980,56 @@
     state.inputController?.modeChanged?.();
     showToast(t(state.controlMode === 'desktop' ? 'control.desktop' : 'control.game'), t(state.controlMode === 'desktop' ? 'control.desktopHint' : 'control.gameHint'));
   };
+  // Keyboard lock (Win, Alt+Tab, Esc, Ctrl+W go to the page). Requests run one after another: Chromium fails
+  // a pending lock() when the next one arrives. Resolves to null when granted, else the error (or 'unsupported').
+  let keyboardLockQueue = Promise.resolve();
+  const lockKeyboard = () => {
+    if (!navigator.keyboard?.lock) return Promise.resolve('unsupported');
+    const request = keyboardLockQueue.then(() => navigator.keyboard.lock().then(() => null, (error) => error));
+    keyboardLockQueue = request;
+    return request;
+  };
+  // 'granted' | 'denied' | 'prompt', or null where the browser has no keyboard-lock permission (Chrome, which
+  // decided against it; Edge has it).
+  const keyboardLockPermission = async () => {
+    try { return (await navigator.permissions.query({ name: 'keyboard-lock' })).state; } catch { return null; }
+  };
+  // Fullscreen, then the keyboard lock: Chromium drops a lock granted while the tab isn't fullscreen yet.
+  // Where the lock needs permission (Edge), its prompt can't show during the switch to fullscreen and counts
+  // as refused ("lock() request could not be registered"), so it is asked for in the window first; answering
+  // it can take longer than the click's activation lasts, and then the fullscreen needs a second click.
+  // Shared by the stream and the interaction test, so the test shows what streams get.
+  const enterFullscreen = async (element) => {
+    const permissionBefore = await keyboardLockPermission();
+    if (permissionBefore === 'prompt') await lockKeyboard();
+    const permission = permissionBefore === 'prompt' ? await keyboardLockPermission() : permissionBefore;
+    try {
+      await element.requestFullscreen({ navigationUI: 'hide' });
+    } catch (error) {
+      error.permission = permission;
+      error.permissionBefore = permissionBefore;
+      throw error;
+    }
+    return { lockError: await lockKeyboard(), permission, permissionBefore };
+  };
   const toggleFullscreen = async () => {
     try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await qs('#streamOverlay')?.requestFullscreen?.({ navigationUI: 'hide' });
-    } catch { /* not allowed (iOS Safari) */ }
+      if (document.fullscreenElement) { await document.exitFullscreen(); return; }
+      const overlay = qs('#streamOverlay'); if (!overlay?.requestFullscreen) return;
+      const { lockError, permission } = await enterFullscreen(overlay);
+      if (lockError && !state.keyboardLockHinted) {
+        state.keyboardLockHinted = true;
+        const detail = lockError === 'unsupported' ? t(window.isSecureContext ? 'control.noKeyboardLockBrowser' : 'control.noKeyboardLockInsecure')
+          : permission === 'denied' ? t('control.keyboardLockDenied')
+          // Permission fine and still refused right away: this browser itself won't lock (its settings, extensions or mode).
+          : t('control.keyboardLockRefused', { error: ((lockError.name || '') + ' ' + (lockError.message || '')).trim() });
+        showToast(t('control.noKeyboardLock'), detail.trim(), 'warning');
+      }
+    } catch (error) {
+      // The permission prompt was answered after the click's activation ran out: fullscreen needs another click.
+      if (error?.permissionBefore === 'prompt') showToast(t(error.permission === 'granted' ? 'control.keyboardLockAllowed' : 'control.noKeyboardLock'), t(error.permission === 'granted' ? 'control.fullscreenAgain' : 'control.keyboardLockDenied'), error.permission === 'granted' ? 'success' : 'warning');
+      /* otherwise not allowed (iOS Safari) */
+    }
   };
   const showSoftKeyboard = () => {
     const input = qs('#streamKeyboardInput'); if (!input) return;
@@ -2066,16 +2138,29 @@
     window.clearTimeout(state.resizeTimer);
     window.clearTimeout(state.resizeVerifyTimer);
   };
+  // At most one host mode change per RESIZE_COOLDOWN_MS; a change asked for sooner waits for the cooldown.
+  const RESIZE_COOLDOWN_MS = 4000;
   const checkAdaptiveResize = async () => {
     const session = state.streamSession;
-    if (!state.streamPlan?.adaptive || !session?.width || state.reconnect || state.stopping || state.videoDecoderState !== 'playing' || state.resizeBusy) return;
+    if (!followsWindow() || !state.streamPlan?.adaptive || !session?.width || state.reconnect || state.stopping || state.videoDecoderState !== 'playing' || state.resizeBusy) return;
+    const wait = (state.lastResizeAt || 0) + RESIZE_COOLDOWN_MS - Date.now();
+    if (wait > 0) {
+      window.clearTimeout(state.resizeTimer);
+      state.resizeTimer = window.setTimeout(() => { void checkAdaptiveResize(); }, wait);
+      return;
+    }
+    // A stage collapsed mid-layout (fullscreen switching) has no meaningful size: wait for the next resize.
+    const stage = qs('.stream-stage')?.getBoundingClientRect();
+    if (!stage || stage.width < 160 || stage.height < 120) return;
     const { width, height } = adaptiveSize();
     if (Math.abs(width - session.width) < 32 && Math.abs(height - session.height) < 32) return;
     state.resizeBusy = true;
     try {
       const result = await bridge.resize(width, height);
       if (!result || result.method === 'none' || !state.streamSession) return;
+      state.lastResizeAt = Date.now();
       state.streamSession = { ...state.streamSession, width: result.width, height: result.height };
+      renderResolutionButton();
       if (result.method === 'dynamic') {
         window.clearTimeout(state.resizeVerifyTimer);
         state.resizeVerifyTimer = window.setTimeout(async () => {
@@ -2162,6 +2247,7 @@
       const session = await bridge.launch({ hostId: host.id, address: host.address, hostName: host.name, appId: app.id, appName: app.name, width: plan.width, height: plan.height, fps: plan.fps, bitrateMode: plan.bitrateMode, videoCodecs, codecProbe: state.codecSupport?.[state.codecProbeKey], codecChoice: state.settings.codec || 'auto' });
       state.streamSession = session;
       state.activeRemoteSession = null;
+      renderResolutionButton();
       startMediaGateway(session);
       startResizeWatcher();
       renderStream('started');
@@ -2200,7 +2286,7 @@
 
   const openSettings = () => { const drawer = qs('#settingsDrawer'); if (drawer) { drawer.classList.add('is-open'); drawer.setAttribute('aria-hidden', 'false'); } };
   const closeSettings = () => { const drawer = qs('#settingsDrawer'); if (drawer) { drawer.classList.remove('is-open'); drawer.setAttribute('aria-hidden', 'true'); } };
-  const toggleSetting = (toggle) => { const isOn = toggle.classList.toggle('is-on'); toggle.setAttribute('aria-pressed', String(isOn)); if (toggle.dataset.toggle === 'reduce-motion') document.documentElement.classList.toggle('reduce-motion', isOn); localStorage.setItem('sunbridge.setting.' + toggle.dataset.toggle, String(isOn)); showToast(isOn ? t('settings.enabled') : t('settings.disabled'), t('settings.updated'), 'success'); };
+  const toggleSetting = (toggle) => { const isOn = toggle.classList.toggle('is-on'); toggle.setAttribute('aria-pressed', String(isOn)); if (toggle.dataset.toggle === 'reduce-motion') document.documentElement.classList.toggle('reduce-motion', isOn); if (toggle.dataset.toggle === 'local-cursor') document.documentElement.classList.toggle('local-cursor', isOn); localStorage.setItem('sunbridge.setting.' + toggle.dataset.toggle, String(isOn)); showToast(isOn ? t('settings.enabled') : t('settings.disabled'), t('settings.updated'), 'success'); };
   const clearActivity = () => { state.activity = []; saveActivity(); renderActivity(); showToast(t('toast.activityCleared'), t('toast.activityReady')); };
 
   const copyPorts = async () => {
@@ -2407,6 +2493,7 @@
     if (action === 'toggle-stats') toggleStatsDetail();
     if (action === 'toggle-control-mode') toggleControlMode();
     if (action === 'toggle-fullscreen') void toggleFullscreen();
+    if (action === 'toggle-follow-window') toggleFollowWindow();
     if (action === 'show-keyboard') showSoftKeyboard();
     if (action === 'send-clipboard') void state.clipboardSync?.sendNow();
     if (action === 'resume-session' && state.activeRemoteSession) void resumeStream(state.activeRemoteSession);
@@ -2438,6 +2525,7 @@
     toggle.classList.toggle('is-on', isOn);
     toggle.setAttribute('aria-pressed', String(isOn));
     if (toggle.dataset.toggle === 'reduce-motion') document.documentElement.classList.toggle('reduce-motion', isOn);
+    if (toggle.dataset.toggle === 'local-cursor') document.documentElement.classList.toggle('local-cursor', isOn);
   });
   document.addEventListener('change', (event) => {
     const target = event.target;
@@ -2460,13 +2548,41 @@
   window.addEventListener('sunbridge:locale', () => { renderAll(); renderHostModal(); applyControlModeUi(); renderReconnect(); renderResumeBar(); });
   // Fullscreen: capture system keys (Win, Alt+Tab, Esc) for the host where the browser allows it.
   document.addEventListener('fullscreenchange', () => {
-    if (document.fullscreenElement) navigator.keyboard?.lock?.().catch?.(() => {});
-    else navigator.keyboard?.unlock?.();
+    if (!document.fullscreenElement) navigator.keyboard?.unlock?.(); // enterFullscreen() locks it
     applyControlModeUi();
+  });
+  // Ctrl+W, Ctrl+R and the like can't be kept from the browser outside fullscreen: ask before leaving a stream.
+  window.addEventListener('beforeunload', (event) => {
+    if (!state.streamSession || state.stopping || qs('#streamOverlay')?.hidden) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
+  // Images (or text) dropped on the stream go to the host's clipboard.
+  const streamStage = qs('#streamOverlay .stream-stage');
+  streamStage?.addEventListener('dragover', (event) => {
+    if (!state.clipboardSync || !Array.from(event.dataTransfer?.types || []).some((type) => type === 'Files' || type === 'text/plain')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  });
+  streamStage?.addEventListener('drop', (event) => {
+    if (!state.clipboardSync) return;
+    event.preventDefault();
+    void state.clipboardSync.sendDataTransfer(event.dataTransfer);
   });
   // Network back: retry right away instead of waiting for the backoff timer.
   window.addEventListener('online', () => { if (state.gatewayRetryTimer) void retryGateway(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.streamSession) void refreshActiveSession(); });
+
+  // For the interaction test (testbench.js): the same fullscreen / keyboard lock path and probes streams use.
+  window.SunbridgeApp = {
+    enterFullscreen, lockKeyboard, keyboardLockPermission, testWebrtc, adaptiveSize, decodableCodecs,
+    diagnostic: () => state.diagnostic,
+    settings: () => ({ ...state.settings }),
+    stream: () => (state.streamSession ? {
+      session: state.streamSession, plan: state.streamPlan, controlMode: state.controlMode, followWindow: followsWindow(),
+      video: state.videoDecoderState, transport: state.mediaTransportInfo, input: state.inputController?.stats || null,
+    } : null),
+  };
 
   // Paint localized, state-accurate shell copy before the first asynchronous Bridge probe.
   // This keeps the initial frame in the selected language and avoids a demo/English flash.

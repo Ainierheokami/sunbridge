@@ -462,6 +462,51 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 #diagnosticStatus[data-level="fail"] { color: var(--orange); }
 @media (max-width: 640px) { .log-lines > .diag-row { grid-template-columns: 2.75rem minmax(0, 1fr); } .diag-row small { grid-column: 2; } .diag-row time { display: none; } }
 
+/* Network → interaction test (testbench.js). The pad stays dark: in fullscreen it is the whole screen, like a stream. */
+.testbench { display: grid; gap: 1rem; margin-top: 1rem; }
+.testbench-card.diagnostic-log { margin-top: 0; }
+.testbench-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }
+.testbench-head h2 { margin-top: 0.125rem; }
+.testbench-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 0.5rem; }
+.testbench-tile { display: grid; gap: 0.125rem; padding: 0.75rem; border-radius: var(--radius-md); background: var(--surface-hover); }
+.testbench-tile span, .testbench-tile small { color: var(--text-3); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.testbench-tile strong { font-size: 1.125rem; font-variant-numeric: tabular-nums; }
+.testbench-error { color: var(--orange); }
+.testbench-error:empty { display: none; }
+.testbench-report-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.testbench-report-actions svg { width: 1rem; height: 1rem; }
+.testbench-copy { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; }
+.testbench-pad { display: grid; align-content: start; gap: 0.75rem; min-height: 20rem; margin-top: 0.75rem; padding: 1rem; border-radius: var(--radius-md); color: #f5f5f7; background: #111113; color-scheme: dark; outline: none; user-select: none; }
+.testbench-pad:focus-visible, .testbench-pad:focus { box-shadow: 0 0 0 2px var(--accent); }
+.testbench-pad:fullscreen { min-height: 100vh; padding: 2rem; border-radius: 0; box-shadow: none; align-content: center; }
+.testbench-pad-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.testbench-pad-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.testbench-pad .secondary-button { color: #f5f5f7; border-color: rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.08); }
+.testbench-pad-hint { margin: 0; color: #a1a1a6; font-size: 0.8125rem; line-height: 1.55; }
+.testbench-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+.testbench-chip { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0.625rem; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: #d0d0d5; font-size: 0.8125rem; }
+.testbench-chip i { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: #636366; }
+.testbench-chip[data-status="ok"] i { background: #30d158; }
+.testbench-chip[data-status="fail"] { color: #ff9f0a; }
+.testbench-chip[data-status="fail"] i { background: #ff453a; }
+.testbench-keys { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: 0.5rem; }
+.testbench-key { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 0.125rem 0.625rem; padding: 0.625rem 0.75rem; border-radius: var(--radius-sm); background: rgba(255, 255, 255, 0.06); font-size: 0.875rem; }
+.testbench-key kbd { grid-row: span 2; min-width: 4.5rem; text-align: center; color: #f5f5f7; }
+.testbench-key small { grid-column: 2; color: #a1a1a6; font-size: 0.75rem; }
+.testbench-key[data-status="ok"] { background: rgba(48, 209, 88, 0.16); }
+.testbench-key[data-status="ok"] span { color: #30d158; }
+.testbench-key[data-status="lost"] { background: rgba(255, 69, 58, 0.16); }
+.testbench-key[data-status="lost"] span { color: #ff6961; }
+.testbench-key[data-status="pending"] span { color: #64d2ff; }
+.testbench-mouse { margin: 0; color: #a1a1a6; font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+.testbench-mouse:empty { display: none; }
+.testbench-ticker { display: grid; gap: 0.25rem; margin: 0; padding: 0; list-style: none; font-size: 0.8125rem; }
+.testbench-ticker li { display: grid; grid-template-columns: 4rem 8rem minmax(0, 1fr); gap: 0.5rem; color: #a1a1a6; }
+.testbench-ticker time { font-variant-numeric: tabular-nums; }
+.testbench-ticker code { color: #f5f5f7; }
+.testbench-ticker span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) { .testbench-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .testbench-ticker li { grid-template-columns: 3.5rem minmax(0, 1fr); } .testbench-ticker span { grid-column: 2; } }
+
 /* ---- Settings (grouped, like System Settings) ---------------------------------------- */
 .settings-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
 .settings-card-wide { grid-column: 1 / -1; }
@@ -619,6 +664,11 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 .stream-video-canvas { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; background: #000; opacity: 0; transition: opacity 200ms ease; touch-action: none; cursor: crosshair; }
 .stream-overlay[data-control-mode="desktop"] .stream-video-canvas { cursor: default; }
 .stream-overlay[data-video-state="playing"] .stream-video-canvas { opacity: 1; }
+/* The host draws its pointer into the video: hide this device's over the picture so there aren't two
+   (back over the letterbox bars, or when "Show local pointer" is on). */
+.stream-overlay[data-video-state="playing"] .stream-video-canvas:not([data-pointer-outside]) { cursor: none; }
+.local-cursor .stream-overlay[data-control-mode="desktop"] .stream-video-canvas { cursor: default; }
+.stream-video-canvas:focus { outline: none; }
 /* No decorative scenery: a calm dark stage until the first frame arrives. */
 .stream-background-grid, .stream-scene, .stream-vignette, .stream-crosshair { display: none; }
 .stream-overlay-top { position: absolute; top: 1rem; left: 1rem; right: 1rem; display: flex; flex-wrap: wrap; gap: 0.375rem 1rem; color: #8e8e93; font-size: 0.8125rem; pointer-events: none; }
@@ -639,7 +689,8 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 kbd { padding: 0.0625rem 0.375rem; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 4px; color: #d0d0d5; background: rgba(255, 255, 255, 0.06); font-size: 0.75rem; }
 body.is-streaming .app-shell { display: none; }
 .stream-overlay[data-video-state="playing"] :is(.stream-overlay-top, .stream-center-status) { display: none; }
-.stream-overlay:fullscreen .stream-shell { grid-template-rows: 0 1fr 0; }
+/* Header and footer float over the video (position: absolute), leaving the stage the only grid item: one row. */
+.stream-overlay:fullscreen .stream-shell { grid-template-rows: minmax(0, 1fr); }
 .stream-overlay:fullscreen :is(.stream-header, .stream-footer) { overflow: hidden; border: 0; }
 .stream-overlay:fullscreen .stream-header { position: absolute; top: 0; right: 0; left: 0; z-index: 5; height: 3.25rem; opacity: 0; transition: opacity 160ms ease; }
 .stream-overlay:fullscreen .stream-header:hover, .stream-overlay:fullscreen .stream-header:focus-within { opacity: 1; }
@@ -838,6 +889,8 @@ textarea:focus-visible { border-color: var(--accent); }
   .stream-header { padding: 0 0.5rem; }
   .stream-brand span, .stream-session-name, .stream-live { display: none; }
   .stream-header-actions { gap: 0.25rem; }
+  #streamResolutionButton span:last-child { display: none; }
+  #streamResolutionButton { padding: 0 0.5rem; }
   .stream-overlay-top { top: 0.75rem; right: 0.75rem; left: 0.75rem; }
   .stream-hint, .stream-footer-right > :not(.stream-hud) { display: none; }
   .stream-footer { padding: 0 0.75rem; }
@@ -856,3 +909,15 @@ textarea:focus-visible { border-color: var(--accent); }
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
 .reduce-motion *, .reduce-motion *::before, .reduce-motion *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+.update-commits { display: grid; gap: 0.375rem; max-height: 14rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.update-commits li { display: grid; grid-template-columns: auto 1fr auto; gap: 0.625rem; align-items: baseline; font-size: 0.875rem; }
+.update-commits code { color: var(--accent-text); font-size: 0.8125rem; }
+.update-commits small { color: var(--text-2); white-space: nowrap; }
+#serviceView:not(:empty) { margin-top: 1rem; }
+.service-row { align-items: flex-start; }
+.service-row:last-of-type { border-bottom: 0; }
+.service-row .update-commits { margin-top: 0.5rem; }
+.service-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; flex-shrink: 0; }
+.setting-row small.service-warn { color: var(--orange); }
+.setting-row small.service-new { color: var(--accent-text); }
+@media (max-width: 640px) { .service-row { flex-direction: column; align-items: stretch; } .service-actions { justify-content: flex-start; } }

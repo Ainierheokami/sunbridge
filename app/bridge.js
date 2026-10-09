@@ -78,7 +78,7 @@
     async healthCheck() {
       if (this.demo) {
         await wait(80);
-        this.health = { ok: true, mode: 'demo', version: '0.2-demo', clientId: 'demo-client' };
+        this.health = { ok: true, mode: 'demo', version: '0.3-demo', clientId: 'demo-client' };
         return this.health;
       }
       this.health = await this.request('/api/bridge/health');

@@ -1,6 +1,6 @@
 {
   "name": "sunbridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Stream a Sunshine host to the browser through a local bridge",
   "license": "GPL-3.0-only",
