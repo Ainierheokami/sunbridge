@@ -156,6 +156,32 @@
     window.setTimeout(() => toast.remove(), 3900);
   };
 
+  const formatBytes = (bytes) => bytes >= 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' KB';
+
+  // Bottom-left progress of a large clipboard upload (clipboard.js onProgress); fades out once it ends.
+  let clipboardProgressTimer = null;
+  const renderClipboardProgress = ({ phase, mime, loaded = 0, total = 0 }) => {
+    const box = qs('#streamTransfer');
+    if (!box) return;
+    clearTimeout(clipboardProgressTimer);
+    box.classList.remove('is-leaving');
+    box.hidden = false;
+    box.dataset.phase = phase;
+    qs('.stream-transfer-label', box).textContent = t(mime === 'text/plain' ? 'clipboard.progress.text' : 'clipboard.progress.image');
+    const percent = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+    qs('.stream-transfer-value', box).textContent = phase === 'upload' ? `${percent}% · ${formatBytes(loaded)} / ${formatBytes(total)}`
+      : phase === 'host' ? t('clipboard.progress.host')
+      : phase === 'done' ? `${t('clipboard.progress.done')} · ${formatBytes(total)}`
+      : t('clipboard.progress.failed');
+    qs('.stream-transfer-track i', box).style.width = phase === 'upload' ? percent + '%' : '';
+    if (phase === 'done' || phase === 'failed') {
+      clipboardProgressTimer = setTimeout(() => {
+        box.classList.add('is-leaving');
+        clipboardProgressTimer = setTimeout(() => { box.hidden = true; box.classList.remove('is-leaving'); }, 220);
+      }, phase === 'done' ? 1200 : 2500);
+    }
+  };
+
   const errorMessage = (error) => {
     const raw = error instanceof Error ? error.message : String(error || t('common.unknown'));
     if (error?.i18nKey) {
@@ -1435,12 +1461,16 @@
     stopStatsLoop();
     try { state.clipboardSync?.stop(); } catch { /* already stopped */ }
     state.clipboardSync = null;
+    clearTimeout(clipboardProgressTimer);
+    if (qs('#streamTransfer')) qs('#streamTransfer').hidden = true;
     state.mediaGatewayGeneration += 1;
     try { state.mediaGateway?.close?.(1000, 'client stopped'); } catch { /* already closed */ }
     try { state.videoPipeline?.stop?.(); } catch { /* already stopped */ }
     try { state.audioPipeline?.stop?.(); } catch { /* already stopped */ }
     try { state.inputController?.stop?.(); } catch { /* already stopped */ }
     state.inputController = null;
+    state.touchBar?.destroy();
+    state.touchBar = null;
     state.mediaGateway = null;
     state.videoPipeline = null;
     state.audioPipeline = null;
@@ -1722,6 +1752,7 @@
         else if (kind === 'file-unsupported') showToast(t('clipboard.title'), t('clipboard.fileUnsupported', { name: file?.name || '' }), 'warning');
       },
       onState: () => { if (generation === state.mediaGatewayGeneration) queueStreamRender(); },
+      onProgress: (progress) => { if (generation === state.mediaGatewayGeneration) renderClipboardProgress(progress); },
     }) || null;
     if (useWorker) {
       state.videoPipeline = state.mediaGateway?.videoPipeline || null;
@@ -1747,13 +1778,29 @@
         send: (message) => state.mediaGateway?.send?.(message),
         isEnabled: () => generation === state.mediaGatewayGeneration && !state.stopping && !qs('#streamOverlay')?.hidden && !qs('#settingsDrawer')?.classList.contains('is-open') && inputConnected(),
         shouldCapturePointer: () => localStorage.getItem('sunbridge.setting.capture-pointer') !== 'false',
-        onStateChange: () => queueStreamRender(),
+        onStateChange: () => { queueStreamRender(); state.touchBar?.render(); },
         onQuit: () => { void stopStream(); },
         getMode: () => state.controlMode || 'game',
+        getTouchMode: touchMode,
         textInput: qs('#streamKeyboardInput'),
         beforePaste: () => state.clipboardSync?.beforePaste() ?? null,
       });
     }
+    state.touchBar?.destroy();
+    state.touchBar = window.SunbridgeTouchBar?.createTouchBar({
+      overlay: qs('#streamOverlay'),
+      keyboardInput: qs('#streamKeyboardInput'),
+      t,
+      hydrateIcons,
+      getState: () => ({ controlMode: state.controlMode, touchMode: touchMode(), fullscreen: Boolean(document.fullscreenElement), sticky: state.inputController?.stats.sticky || [] }),
+      showKeyboard: showSoftKeyboard,
+      setTouchMode,
+      toggleControlMode,
+      toggleFullscreen,
+      pressKey: (code) => state.inputController?.pressKey(code),
+      toggleModifier: (code) => state.inputController?.toggleModifier(code),
+      clearModifiers: () => state.inputController?.clearModifiers(),
+    }) || null;
     queueStreamRender();
   };
 
@@ -1952,6 +1999,19 @@
     }
     const keyboard = qs('#streamKeyboardButton'); if (keyboard) keyboard.title = t('control.keyboard');
     renderResolutionButton();
+    state.touchBar?.render();
+  };
+  // Touch in desktop mode: 'direct' (the cursor goes where the finger is) or 'trackpad'. Phones default to
+  // the trackpad - a fingertip covers too much of a small picture to point with - tablets to direct touch.
+  const touchMode = () => {
+    let saved = null;
+    try { saved = localStorage.getItem('sunbridge.setting.touch-mode'); } catch { /* storage blocked */ }
+    if (saved === 'direct' || saved === 'trackpad') return saved;
+    return Math.min(window.screen.width, window.screen.height) < 600 ? 'trackpad' : 'direct';
+  };
+  const setTouchMode = (mode) => {
+    try { localStorage.setItem('sunbridge.setting.touch-mode', mode); } catch { /* storage blocked */ }
+    showToast(t(mode === 'trackpad' ? 'touch.trackpad' : 'touch.direct'), t(mode === 'trackpad' ? 'touch.trackpadHint' : 'touch.directHint'));
   };
   // Adaptive streams: follow the window, or keep the current resolution (a window being dragged around
   // would otherwise make the host switch modes again and again).

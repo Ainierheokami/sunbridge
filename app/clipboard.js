@@ -11,6 +11,8 @@
 //   - host -> this device: written to the local clipboard; when the browser refuses (page not focused, no
 //     user gesture yet) it is kept and written on the next focus or click.
 // A fingerprint of the last content sent or received stops it bouncing back and forth.
+// Large content (images, mostly) reports its progress through onProgress: the upload to the bridge in bytes,
+// then the bridge's hand-off to the host (no byte count there) until the host has it on its clipboard.
 (function () {
   'use strict';
 
@@ -42,9 +44,27 @@
     }
   }
 
-  function createClipboardSync({ isEnabled = () => true, onNotice = () => {}, onState = () => {} } = {}) {
+  // Below this the upload is over before a progress bar could mean anything.
+  const PROGRESS_MIN_BYTES = 256 * 1024;
+
+  // POST with upload progress (fetch has none). onUpload(loaded, total) while the body goes out.
+  function post(url, body, headers, onUpload) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+      xhr.responseType = 'json';
+      xhr.upload.onprogress = (event) => onUpload(event.loaded, event.lengthComputable ? event.total : body.size);
+      xhr.onload = () => resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, result: xhr.response || {} });
+      xhr.onerror = xhr.onabort = () => reject(new TypeError('Network error'));
+      xhr.send(body);
+    });
+  }
+
+  function createClipboardSync({ isEnabled = () => true, onNotice = () => {}, onState = () => {}, onProgress = () => {} } = {}) {
     let capability = { text: false, image: false };
     let lastFingerprint = null;
+    let localFingerprint = null; // what this device's clipboard is known to hold (last sent from or written to it)
     let pendingInbound = null;
     let readBlocked = false;
     let busy = false;
@@ -77,10 +97,27 @@
       const print = await fingerprint(content);
       if (print === lastFingerprint && !manual) return false;
       const body = content.mime === 'text/plain' ? new Blob([content.data], { type: 'text/plain' }) : content.data;
-      const response = await fetch('/api/bridge/clipboard', { method: 'POST', headers: { 'X-Clipboard-Mime': content.mime }, body });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || result.ok === false) throw Object.assign(new Error(result.error || `HTTP ${response.status}`), { name: 'BridgeError' });
+      const total = body.size;
+      const report = total >= PROGRESS_MIN_BYTES ? onProgress : () => {};
+      report({ phase: 'upload', mime: content.mime, loaded: 0, total });
+      let response;
+      try {
+        response = await post('/api/bridge/clipboard', body, { 'X-Clipboard-Mime': content.mime }, (loaded) => {
+          // All of it with the bridge: what is left is the bridge's own upload to the host.
+          report(loaded >= total ? { phase: 'host', mime: content.mime, loaded: total, total } : { phase: 'upload', mime: content.mime, loaded, total });
+        });
+      } catch (error) {
+        report({ phase: 'failed', mime: content.mime, total });
+        throw error;
+      }
+      const { result } = response;
+      if (!response.ok || result.ok === false) {
+        report({ phase: 'failed', mime: content.mime, total });
+        throw Object.assign(new Error(result.error || `HTTP ${response.status}`), { name: 'BridgeError' });
+      }
+      report({ phase: 'done', mime: content.mime, loaded: total, total });
       lastFingerprint = print;
+      localFingerprint = print;
       if (manual) onNotice(manual === 'drop' ? 'dropped' : 'sent', content);
       return true;
     }
@@ -149,6 +186,7 @@
         if (content.mime === 'text/plain') await navigator.clipboard.writeText(content.data);
         else await navigator.clipboard.write([new ClipboardItem({ [content.mime]: content.data })]);
         pendingInbound = null;
+        localFingerprint = await fingerprint(content);
         onNotice('received', content);
         // The browser re-encodes images it writes: remember what it actually holds now, or the next focus
         // (or Ctrl+V) would send the same picture back to the host as a "new" one.
@@ -156,7 +194,7 @@
           try {
             if ((await navigator.permissions.query({ name: 'clipboard-read' })).state === 'granted') {
               const stored = await readLocal();
-              if (stored) lastFingerprint = await fingerprint(stored);
+              if (stored) lastFingerprint = localFingerprint = await fingerprint(stored);
             }
           } catch { /* can't read it back here: at worst the picture is sent back once */ }
         }
@@ -210,17 +248,37 @@
       clearTimeout(waiter.timer);
       event.preventDefault();
       const snap = snapshot(event.clipboardData);
+      pendingInbound = null;
       void sendSnapshot(snap, false).finally(() => waiter.resolve());
     };
 
-    const onFocus = () => {
-      if (stopped) return;
-      if (pendingInbound) void writeLocal(pendingInbound);
-      else void sendLocal(false);
-    };
+    // Host content still waiting to be written, unless this device's clipboard changed meanwhile (the user
+    // copied something here after it arrived): that is newer, it goes to the host and the waiting one is dropped.
+    async function writePendingOrSend() {
+      const pending = pendingInbound;
+      if (!pending) return void sendLocal(false);
+      if (busy) return;
+      let local = null;
+      busy = true;
+      try {
+        if ((await navigator.permissions.query({ name: 'clipboard-read' })).state === 'granted') local = await readLocal();
+      } catch { /* can't tell: the waiting content wins, as before */ } finally {
+        busy = false;
+      }
+      if (pendingInbound !== pending || stopped) return;
+      if (local && localFingerprint && (await fingerprint(local)) !== localFingerprint) {
+        pendingInbound = null;
+        onState(state());
+        void sendLocal(false);
+      } else {
+        void writeLocal(pending);
+      }
+    }
+    const onFocus = () => { if (!stopped) void writePendingOrSend(); };
     const onVisible = () => { if (document.visibilityState === 'visible' && document.hasFocus()) onFocus(); };
-    // A click is a user gesture: the moment a refused write goes through.
-    const onPointer = () => { if (pendingInbound && !stopped) void writeLocal(pendingInbound); };
+    // A click is a user gesture: the moment a refused write goes through. A click that brings the page back
+    // is left to onFocus (pointerdown comes first), which checks for a newer copy on this device.
+    const onPointer = () => { if (pendingInbound && !stopped && document.hasFocus()) void writeLocal(pendingInbound); };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onVisible);
     document.addEventListener('pointerdown', onPointer, true);

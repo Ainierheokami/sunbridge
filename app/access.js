@@ -495,7 +495,7 @@
   }
 
   async function refreshLogs() {
-    if (isDemo()) { document.getElementById('logsView')?.replaceChildren(h('p', { class: 'host-hint', text: t('access.demo') })); return; }
+    if (isDemo()) { document.getElementById('logsView')?.replaceChildren(h('p', { class: 'host-hint', text: t('logs.demo') })); return; }
     try { await loadLogs(); } catch (error) { state.logs = [{ time: new Date().toISOString(), level: 'error', category: 'system', message: error.message }]; }
     renderLogs();
   }

@@ -41,7 +41,7 @@ if (ENV_ENTRYPOINT) netConfig = { ...netConfig, entrypoints: [ENV_ENTRYPOINT] };
 const ENV_CERTIFICATES = process.env.SUNBRIDGE_TLS_CERT && process.env.SUNBRIDGE_TLS_KEY ? [{ cert: process.env.SUNBRIDGE_TLS_CERT, key: process.env.SUNBRIDGE_TLS_KEY }] : [];
 const EXTRA_ORIGINS = envList(process.env.SUNBRIDGE_ALLOWED_ORIGINS) || netConfig.allowedOrigins;
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/theme.js', '/assets/sunbridge-icon.svg', '/favicon.ico']);
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const updater = createUpdater({ appDir: ROOT, version: VERSION });
 const DEFAULT_HTTP_PORT = 47989;
 const DEFAULT_HTTPS_PORT = 47984;
@@ -908,7 +908,7 @@ function requestHost(host, endpoint, params = {}, options = {}) {
       // Sunshine closes the connection after each response; reusing a pooled socket races that close.
       agent: false,
       headers: {
-        Accept: 'application/xml, text/xml, */*', 'User-Agent': 'Sunbridge/0.3', Connection: 'close',
+        Accept: 'application/xml, text/xml, */*', 'User-Agent': 'Sunbridge/0.4', Connection: 'close',
         ...(options.body ? { 'Content-Type': 'application/octet-stream', 'Content-Length': options.body.length } : {}),
         ...(options.headers || {}),
       },
@@ -3165,6 +3165,7 @@ async function launchHost(input) {
 // ---------------------------------------------------------------------------
 const CONTROL_CLIPBOARD = 0x5508;
 const CLIPBOARD_INLINE_TEXT = 256 * 1024;
+const CLIPBOARD_APPLY_WAIT_MS = 1500;
 const clipboardEcho = Clipboard.createEchoFilter();
 const clipboardStore = Clipboard.createStore();
 
@@ -3225,7 +3226,11 @@ async function sendClipboardToHost(session, mime, data) {
   const { frame, token } = Clipboard.encodeFrame(frameKind, payload);
   clipboardEcho.sent(token);
   if (control.sendMessage(CONTROL_CLIPBOARD, frame) === false) throw bridgeError('发送到主机失败', 'CLIPBOARD_UNAVAILABLE', { statusCode: 503 });
-  return { kind: frameKind === Clipboard.KIND.REF ? 'blob' : 'inline', bytes: data.length };
+  // Answer once the agent has the content on the host clipboard (it echoes the token): a Ctrl+V the browser
+  // holds until this answer would otherwise overtake it - keys go on their own ENet channel, the agent sets
+  // the clipboard asynchronously - and paste the host's old content.
+  const applied = await clipboardEcho.applied(token, CLIPBOARD_APPLY_WAIT_MS);
+  return { kind: frameKind === Clipboard.KIND.REF ? 'blob' : 'inline', bytes: data.length, applied };
 }
 
 const SPEEDTEST_MAX_BYTES = 64 * 1024 * 1024;
@@ -3825,7 +3830,7 @@ async function handleApi(request, response, pathname) {
 
 // Only the web client itself is served. Everything else in this directory (data with the pairing
 // key, password hashes and TLS keys, certs/, scripts, tests, backups, server sources) must never be readable.
-const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/testbench.js', '/favicon.ico']);
+const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/touchbar.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/testbench.js', '/favicon.ico']);
 const isServableStatic = (requestedPath) => STATIC_FILES.has(requestedPath) || /^\/assets\/[\w.-]+\.(png|jpe?g|svg|webp|ico)$/i.test(requestedPath);
 
 function serveStatic(request, response, pathname) {

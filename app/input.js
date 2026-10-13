@@ -86,7 +86,9 @@
   //     text is sent as Unicode; only keys that don't type (Enter, arrows, shortcuts) go as raw keys.
   // beforePaste(): called on Ctrl/Cmd+V; while the promise it returns is pending, the keystroke is held back so
   // the host pastes this device's clipboard (clipboard sync) rather than its own old content.
-  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', textInput = null, beforePaste = null } = {}) {
+  // getTouchMode(): how touches drive the host's mouse in desktop mode - 'direct' (the cursor goes where the
+  // finger is) or 'trackpad' (the screen is a laptop trackpad: drag moves the cursor, tap clicks).
+  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', getTouchMode = () => 'direct', textInput = null, beforePaste = null } = {}) {
     if (!canvas || typeof send !== 'function') throw new TypeError('createInputController needs a canvas and a send function');
     const pressedKeys = new Map(); // code -> vk
     const pressedButtons = new Set();
@@ -102,7 +104,10 @@
     let gamepadFrame = null;
     let stopped = false;
     let held = null; // events held back while a paste waits for the clipboard to reach the host
-    const stats = { events: 0, pointerLocked: false, gamepads: 0 };
+    const stats = { events: 0, pointerLocked: false, gamepads: 0, sticky: [] };
+    // Modifiers latched from the touch key bar (no physical Ctrl / Alt / Win on a phone): they go down before
+    // the next key or typed character and come up after it.
+    const sticky = new Set();
 
     const on = (target, type, handler, options) => {
       target.addEventListener(type, handler, options);
@@ -309,12 +314,40 @@
     }, { passive: false });
 
     // ----- touch gestures (desktop mode) -----
-    // One finger: tap = click, drag = left-button drag, hold = right click.
-    // Two fingers: tap = right click, drag = scroll.
+    // Direct: one finger tap = click there, drag = left-button drag, hold = right click.
+    // Trackpad: one finger drag = move the cursor, tap = click where the cursor is, tap then drag = left-button
+    // drag, hold = right click.
+    // Both: two fingers tap = right click, drag = scroll.
     const touches = new Map();
     let gesture = null;
+    let lastTapAt = 0; // trackpad: a touch soon after a tap drags
     const LONG_PRESS_MS = 550;
     const TAP_SLOP_PX = 10;
+    const DOUBLE_TAP_MS = 280;
+    const trackpad = () => getTouchMode() === 'trackpad';
+    // Finger travel -> host pixels: one screen pixel of the picture per CSS pixel, faster for quick strokes.
+    let relRemainderX = 0;
+    let relRemainderY = 0;
+    const moveBy = (dx, dy, dt) => {
+      const rect = canvas.getBoundingClientRect();
+      const width = Number(canvas.dataset.videoWidth) || canvas.width || 1;
+      const height = Number(canvas.dataset.videoHeight) || canvas.height || 1;
+      const scale = 1 / (Math.min(rect.width / width, rect.height / height) || 1);
+      const speed = Math.hypot(dx, dy) / Math.max(dt, 1); // CSS px per ms
+      const gain = scale * Math.min(3, 1.2 + speed * 0.9);
+      relRemainderX += dx * gain;
+      relRemainderY += dy * gain;
+      const x = Math.trunc(relRemainderX);
+      const y = Math.trunc(relRemainderY);
+      relRemainderX -= x;
+      relRemainderY -= y;
+      if (x || y) { pendingDx += x; pendingDy += y; schedule(); }
+    };
+    const clickHere = (button) => {
+      flush();
+      push({ kind: 'mouse-button', button, down: true });
+      push({ kind: 'mouse-button', button, down: false });
+    };
     const moveTo = (x, y) => {
       const point = videoPoint(canvas, x, y);
       if (point) { pendingAbs = point; schedule(); }
@@ -334,13 +367,15 @@
     on(canvas, 'pointerdown', (event) => {
       if (!active() || event.pointerType !== 'touch' || !desktopMode()) return;
       event.preventDefault();
-      touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      touches.set(event.pointerId, { x: event.clientX, y: event.clientY, at: performance.now() });
       if (touches.size === 1) {
-        gesture = { fingers: 1, startX: event.clientX, startY: event.clientY, startAt: performance.now(), moved: false, dragging: false, longPressed: false, timer: null };
+        const now = performance.now();
+        gesture = { fingers: 1, startX: event.clientX, startY: event.clientY, startAt: now, moved: false, dragging: false, longPressed: false, timer: null, trackpad: trackpad(), afterTap: now - lastTapAt < DOUBLE_TAP_MS };
         gesture.timer = setTimeout(() => {
           if (!gesture || gesture.moved || gesture.fingers !== 1) return;
           gesture.longPressed = true;
-          click(3, gesture.startX, gesture.startY);
+          if (gesture.trackpad) clickHere(3);
+          else click(3, gesture.startX, gesture.startY);
         }, LONG_PRESS_MS);
       } else if (touches.size === 2 && gesture) {
         clearTimeout(gesture.timer);
@@ -351,12 +386,24 @@
     });
     on(window, 'pointermove', (event) => {
       if (!active() || event.pointerType !== 'touch' || !desktopMode() || !touches.has(event.pointerId) || !gesture) return;
-      touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const previous = touches.get(event.pointerId);
+      const now = performance.now();
+      touches.set(event.pointerId, { x: event.clientX, y: event.clientY, at: now });
       if (gesture.fingers === 1) {
         if (!gesture.moved && Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < TAP_SLOP_PX) return;
         gesture.moved = true;
         clearTimeout(gesture.timer);
         if (gesture.longPressed) return;
+        if (gesture.trackpad) {
+          // Tap, then touch again and drag: the left button stays down for the drag (as on a laptop trackpad).
+          if (gesture.afterTap && !gesture.dragging) {
+            gesture.dragging = true;
+            flush();
+            push({ kind: 'mouse-button', button: 1, down: true });
+          }
+          moveBy(event.clientX - previous.x, event.clientY - previous.y, now - previous.at);
+          return;
+        }
         if (!gesture.dragging) {
           gesture.dragging = true;
           moveTo(gesture.startX, gesture.startY);
@@ -388,8 +435,13 @@
       if (touches.size) return;
       const quick = performance.now() - gesture.startAt < 350;
       if (event.type !== 'pointercancel') {
-        if (gesture.fingers === 2 && !gesture.scrolled && quick) click(3, gesture.startX, gesture.startY);
-        else if (gesture.fingers === 1 && !gesture.moved && !gesture.longPressed) click(1, gesture.startX, gesture.startY);
+        if (gesture.fingers === 2 && !gesture.scrolled && quick) {
+          if (gesture.trackpad) clickHere(3);
+          else click(3, gesture.startX, gesture.startY);
+        } else if (gesture.fingers === 1 && !gesture.moved && !gesture.longPressed) {
+          if (gesture.trackpad) { clickHere(1); lastTapAt = performance.now(); }
+          else click(1, gesture.startX, gesture.startY);
+        }
       }
       endGesture();
     };
@@ -397,7 +449,26 @@
     on(window, 'pointercancel', touchEnd);
 
     // ----- soft keyboard (touch devices): a hidden textarea turns typed text into UTF-8 text input -----
+    const MODIFIER_FLAG = { ControlLeft: MODIFIER.CTRL, AltLeft: MODIFIER.ALT, ShiftLeft: MODIFIER.SHIFT, MetaLeft: MODIFIER.META };
+    const stickyChanged = () => { stats.sticky = [...sticky]; notify(); };
+    // A key (KeyboardEvent.code) with the latched modifiers around it; they are released afterwards.
+    const pressKey = (code) => {
+      const vk = VK[code];
+      if (!vk || !active()) return false;
+      const mods = [...sticky];
+      const flags = mods.reduce((value, mod) => value | (MODIFIER_FLAG[mod] || 0), 0);
+      mods.forEach((mod) => push({ kind: 'key', keyCode: VK[mod], down: true, modifiers: flags }));
+      push({ kind: 'key', keyCode: vk, down: true, modifiers: flags });
+      push({ kind: 'key', keyCode: vk, down: false, modifiers: flags });
+      mods.reverse().forEach((mod) => push({ kind: 'key', keyCode: VK[mod], down: false, modifiers: 0 }));
+      if (sticky.size) { sticky.clear(); stickyChanged(); }
+      return true;
+    };
+    // A typed character while a modifier is latched is a shortcut (Ctrl + C), not text: as the physical key.
+    const CHAR_CODES = { ' ': 'Space', '-': 'Minus', '=': 'Equal', ',': 'Comma', '.': 'Period', '/': 'Slash', ';': 'Semicolon', "'": 'Quote', '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash', '`': 'Backquote' };
+    const codeOfChar = (char) => /^[a-z]$/i.test(char) ? 'Key' + char.toUpperCase() : /^[0-9]$/.test(char) ? 'Digit' + char : CHAR_CODES[char] || null;
     const sendText = (text) => {
+      if (sticky.size && [...text].length === 1 && codeOfChar(text)) { pressKey(codeOfChar(text)); return; }
       // Sunshine takes at most 32 UTF-8 bytes per text packet.
       let chunk = '';
       for (const char of text) {
@@ -407,6 +478,7 @@
       if (chunk) push({ kind: 'text', text: chunk });
     };
     const tapKey = (vk) => {
+      if (sticky.size) { pressKey(Object.keys(VK).find((code) => VK[code] === vk)); return; }
       push({ kind: 'key', keyCode: vk, down: true, modifiers: 0 });
       push({ kind: 'key', keyCode: vk, down: false, modifiers: 0 });
     };
@@ -515,6 +587,14 @@
       capture: requestCapture,
       // Switching to desktop mode releases the pointer lock.
       modeChanged() { if (desktopMode() && pointerLocked()) document.exitPointerLock?.(); },
+      // Touch key bar: a key (KeyboardEvent.code) with the latched modifiers, and latching one.
+      pressKey,
+      toggleModifier(code) {
+        if (!MODIFIER_FLAG[code]) return;
+        if (sticky.has(code)) sticky.delete(code); else sticky.add(code);
+        stickyChanged();
+      },
+      clearModifiers() { if (sticky.size) { sticky.clear(); stickyChanged(); } },
       releaseAll,
       rumble,
       stop() {

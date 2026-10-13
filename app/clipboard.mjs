@@ -65,13 +65,35 @@ export function featureFlagsFromSdp(sdp) {
   return { text: Boolean(flags & FEATURE_CLIPBOARD_TEXT), image: Boolean(flags & FEATURE_CLIPBOARD_IMAGE) };
 }
 
-// Tokens of frames we sent recently (host echo suppression).
+// Tokens of frames we sent recently (host echo suppression). The echo also tells us the agent has put our
+// content on the host clipboard: applied(token) resolves then (true), or false after timeoutMs.
 export function createEchoFilter() {
-  const sent = new Map(); // token -> sentAt
-  const prune = (now) => { for (const [token, at] of sent) if (now - at > ECHO_TTL_MS) sent.delete(token); };
+  const sent = new Map(); // token -> { at, resolve }
+  const prune = (now) => {
+    for (const [token, entry] of sent) if (now - entry.at > ECHO_TTL_MS) { sent.delete(token); entry.resolve(false); }
+  };
   return {
-    sent(token) { const now = Date.now(); prune(now); sent.set(token >>> 0, now); },
-    isEcho(token) { const now = Date.now(); prune(now); return sent.delete(token >>> 0); },
+    sent(token) {
+      const now = Date.now();
+      prune(now);
+      let resolve;
+      const applied = new Promise((done) => { resolve = done; });
+      sent.set(token >>> 0, { at: now, resolve, applied });
+    },
+    isEcho(token) {
+      prune(Date.now());
+      const entry = sent.get(token >>> 0);
+      if (!entry) return false;
+      sent.delete(token >>> 0);
+      entry.resolve(true);
+      return true;
+    },
+    applied(token, timeoutMs) {
+      const entry = sent.get(token >>> 0);
+      if (!entry) return Promise.resolve(false);
+      let timer;
+      return Promise.race([entry.applied, new Promise((done) => { timer = setTimeout(done, timeoutMs, false); })]).finally(() => clearTimeout(timer));
+    },
   };
 }
 
