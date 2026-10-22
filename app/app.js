@@ -1323,6 +1323,7 @@
         row(t('stats.negotiation'), negotiationText(state.bridgeStats?.codecNegotiation)),
         row(t('stats.clipboard'), clipboardText(), state.clipboardSync?.state.readBlocked ? 'warn' : ''),
         row(t('stats.mediaTransport'), transportText(), state.bridgeStats?.transport === 'webrtc' ? '' : 'warn'),
+        state.bridgeStats?.transport === 'webrtc' && state.bridgeStats.webrtc?.fecPercent ? row(t('stats.fecRecovered'), String(state.rtcRecovered || 0) + ' · ' + t('stats.fecPercent', { percent: state.bridgeStats.webrtc.fecPercent })) : '',
         row(t('stats.transport'), state.bridgeStats ? (state.bridgeStats.frameTransport ? t('stats.transportFrames', { fec: state.bridgeStats.fecPercent ?? '—' }) : t('stats.transportPackets')) + (state.bridgeStats.audioPacketMs ? ' · ' + t('stats.audioPackets', { ms: state.bridgeStats.audioPacketMs }) : '') : '—'),
         row(t('stats.decodeQueue'), live ? String(live.decodeQueue) + (live.backlogResets ? ' · ' + t('stats.backlogResets', { count: live.backlogResets }) : '') : '—', live?.decodeQueue > 2 || live?.backlogResets ? 'warn' : ''),
       ]) +
@@ -1544,6 +1545,7 @@
     stopMediaGateway();
     const generation = state.mediaGatewayGeneration;
     state.mediaTransportInfo = null;
+    state.rtcRecovered = 0;
     state.mediaGatewayState = bridge.isDemo ? 'demo' : 'waiting';
     state.videoDecoderState = bridge.isDemo ? 'demo' : 'waiting-keyframe';
     state.mediaGatewayError = null;
@@ -1652,6 +1654,7 @@
           ...videoCallbacks,
           onAudioStats: (stats) => { if (generation === state.mediaGatewayGeneration) state.audioPipeline?.decodeStats?.(stats); },
           onTransport: (info) => { if (generation === state.mediaGatewayGeneration) { state.mediaTransportInfo = info; queueStreamRender(); } },
+          onRtcStats: (stats) => { if (generation === state.mediaGatewayGeneration) { state.rtcRecovered = stats.recovered; queueStreamRender(); } },
         },
       } : null,
       onOpen: (info) => {

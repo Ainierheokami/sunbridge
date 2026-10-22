@@ -1682,8 +1682,9 @@
       let pc;
       try {
         pc = new RTCPeerConnection({ iceServers: [] });
-        const videoChannel = pc.createDataChannel('video', { ordered: false, maxPacketLifeTime: 150 });
-        // Lifetimes match webrtc.mjs: retransmitted only while still useful.
+        // Reliability matches webrtc.mjs: video retransmitted a few times (a lifetime would also count the time a
+        // keyframe burst waits in the send queue), audio only while still useful.
+        const videoChannel = pc.createDataChannel('video', { ordered: false, maxRetransmits: 3 });
         const audioChannel = pc.createDataChannel('audio', { ordered: false, maxPacketLifeTime: 80 });
         worker.postMessage({ type: 'rtc-channels', video: videoChannel, audio: audioChannel }, [videoChannel, audioChannel]);
       } catch {
@@ -1752,6 +1753,7 @@
         }
         case 'video-hardware-fallback': callbacks.onHardwareFallback?.({ codecFamily: message.codecFamily }); break;
         case 'audio-stats': callbacks.onAudioStats?.(message.stats); break;
+        case 'rtc-stats': callbacks.onRtcStats?.({ recovered: message.recovered }); break;
         case 'audio-error': callbacks.onAudioError?.(new Error(message.message)); break;
         case 'audio-socket-fallback': callbacks.onAudioSocketFallback?.(); break;
         default: break;
@@ -1831,7 +1833,87 @@
     };
   }
 
-  const api = { createWorkerSocket, createWorkerAudioOutput, MAGIC, VERSION, STREAM_IDS, VIDEO_FLAGS, AUDIO_PAYLOAD_TYPES, FRAME_HEADER_BYTES, recoverShards, createFrameAssembler, parseRtp, parseEnvelope, forEachEnvelope, hevcInfo, hevcCodecString, av1Info, av1CodecString, parseVideoPacket, parseAudioPacket, createVideoPipeline, createAudioPipeline, h264Info, avcCodecString, buildAvcDecoderConfigurationRecord, toAvcSample };
+  // WebRTC video fragments (webrtc.mjs fragmentFrame): an envelope goes out in FEC blocks, each its data
+  // fragments of up to fragmentBytes then its parity fragments; any dataCount fragments of a block rebuild it.
+  // Header: u32 frame sequence, u32 envelope length, u16 first data fragment of the block, u16 data fragments in
+  // the block, u16 parity fragments in the block, u16 index in the block. add() returns a whole frame
+  // { sequence, data } once every block is complete (parity makes up the missing fragments), else null.
+  function createRtcReassembler({ fragmentBytes = 1120, headerBytes = 16, isStale = () => false } = {}) {
+    const partial = new Map(); // sequence -> { length, total, blocks: Map(first -> block), done, out, firstAt }
+    const stats = { recovered: 0 }; // frames that needed parity
+    const seqBefore = (a, b) => ((a - b) | 0) < 0;
+    const padded = (bytes) => {
+      if (bytes.length === fragmentBytes) return bytes;
+      const out = new Uint8Array(fragmentBytes); // parity was computed over zero-padded fragments
+      out.set(bytes);
+      return out;
+    };
+    // Copy a complete block into the frame; false when its parity can't rebuild it.
+    const finishBlock = (entry, first, block) => {
+      const { dataCount, parityCount, shards } = block;
+      const data = shards.slice(0, dataCount);
+      if (data.includes(undefined)) {
+        for (let i = 0; i < dataCount; i += 1) if (data[i]) data[i] = padded(data[i]);
+        const parity = new Map();
+        for (let j = 0; j < parityCount; j += 1) if (shards[dataCount + j]) parity.set(j, shards[dataCount + j]);
+        if (!recoverShards(data, parity, dataCount, parityCount, fragmentBytes)) return false;
+        entry.recovered = true;
+      }
+      for (let i = 0; i < dataCount; i += 1) {
+        const start = (first + i) * fragmentBytes;
+        entry.out.set(data[i].subarray(0, Math.min(fragmentBytes, entry.length - start)), start);
+      }
+      entry.done += dataCount;
+      return true;
+    };
+    return {
+      stats,
+      add(buffer, now) {
+        if (!(buffer instanceof ArrayBuffer) || buffer.byteLength <= headerBytes) return null;
+        const view = new DataView(buffer);
+        const sequence = view.getUint32(0);
+        const length = view.getUint32(4);
+        const first = view.getUint16(8);
+        const dataCount = view.getUint16(10);
+        const parityCount = view.getUint16(12);
+        const index = view.getUint16(14);
+        const total = Math.max(1, Math.ceil(length / fragmentBytes));
+        if (!dataCount || index >= dataCount + parityCount || first + dataCount > total || isStale(sequence)) return null;
+        let entry = partial.get(sequence);
+        if (!entry) {
+          entry = { length, total, blocks: new Map(), done: 0, out: new Uint8Array(length), recovered: false, firstAt: now };
+          partial.set(sequence, entry);
+        }
+        if (entry.length !== length) return null;
+        let block = entry.blocks.get(first);
+        if (!block) {
+          block = { dataCount, parityCount, shards: new Array(dataCount + parityCount), received: 0, complete: false };
+          entry.blocks.set(first, block);
+        }
+        if (block.complete || block.dataCount !== dataCount || block.shards[index]) return null;
+        block.shards[index] = new Uint8Array(buffer, headerBytes);
+        block.received += 1;
+        if (block.received < dataCount) return null;
+        block.complete = true;
+        if (!finishBlock(entry, first, block)) { partial.delete(sequence); return null; }
+        block.shards = null;
+        if (entry.done < entry.total) return null;
+        partial.delete(sequence);
+        if (entry.recovered) stats.recovered += 1;
+        return { sequence, data: entry.out.buffer };
+      },
+      // Frames still waiting for fragments after maxAgeMs are given up.
+      expire(now, maxAgeMs) {
+        for (const [sequence, entry] of partial) if (now - entry.firstAt > maxAgeMs) partial.delete(sequence);
+      },
+      // Frames before sequence are skipped for good.
+      dropBefore(sequence) {
+        for (const key of [...partial.keys()]) if (seqBefore(key, sequence)) partial.delete(key);
+      },
+    };
+  }
+
+  const api = { createWorkerSocket, createWorkerAudioOutput, MAGIC, VERSION, STREAM_IDS, VIDEO_FLAGS, AUDIO_PAYLOAD_TYPES, FRAME_HEADER_BYTES, recoverShards, createRtcReassembler, createFrameAssembler, parseRtp, parseEnvelope, forEachEnvelope, hevcInfo, hevcCodecString, av1Info, av1CodecString, parseVideoPacket, parseAudioPacket, createVideoPipeline, createAudioPipeline, h264Info, avcCodecString, buildAvcDecoderConfigurationRecord, toAvcSample };
   if (typeof window !== 'undefined') window.SunbridgeMedia = api;
   if (typeof globalThis !== 'undefined') globalThis.SunbridgeMedia = api;
 })();

@@ -323,6 +323,7 @@
     const enabled = h('input', { type: 'checkbox', checked: info.settings.enabled });
     const port = h('input', { type: 'number', min: '1', max: '65535', value: info.settings.port || '', placeholder: String(info.target.udpPort) });
     const address = h('input', { value: info.settings.publicAddress || '', placeholder: t('access.webrtcAddressAuto', { value: info.target.host ? `${info.target.host}:${info.target.port}` : '—' }), spellcheck: 'false' });
+    const fec = h('input', { type: 'number', min: '0', max: '50', step: '5', value: info.settings.fecPercent || 0 });
     const output = h('p', { class: 'security-message', role: 'status' });
     const status = info.support.available
       ? t('access.webrtcReady', { host: info.target.host || '—', port: info.target.port, udp: info.target.udpPort })
@@ -331,7 +332,7 @@
       const password = await askPassword(t('access.webrtcTitle'), t('access.webrtcSaveCopy'));
       if (password == null) return;
       try {
-        const result = await call('/api/settings/webrtc', { password, webrtc: { enabled: enabled.checked, port: port.value ? Number(port.value) : null, publicAddress: address.value.trim() || null } });
+        const result = await call('/api/settings/webrtc', { password, webrtc: { enabled: enabled.checked, port: port.value ? Number(port.value) : null, publicAddress: address.value.trim() || null, fecPercent: Number(fec.value) || 0 } });
         state.network = { ...state.network, ...result };
         render();
       } catch (error) { output.textContent = error.message; }
@@ -342,7 +343,9 @@
       h('label', { class: 'host-field access-checkbox' }, enabled, h('span', { text: t('access.webrtcEnabled') })),
       h('div', { class: 'entry-grid' },
         h('label', { class: 'host-field' }, h('span', { text: t('access.webrtcPort') }), h('div', { class: 'input-shell' }, port)),
-        h('label', { class: 'host-field' }, h('span', { text: t('access.webrtcAddress') }), h('div', { class: 'input-shell' }, address))),
+        h('label', { class: 'host-field' }, h('span', { text: t('access.webrtcAddress') }), h('div', { class: 'input-shell' }, address)),
+        h('label', { class: 'host-field' }, h('span', { text: t('access.webrtcFec') }), h('div', { class: 'input-shell' }, fec))),
+      h('p', { class: 'host-hint', text: t('access.webrtcFecHint') }),
       h('div', { class: 'dialog-actions' }, h('button', { class: 'primary-button', type: 'button', text: t('access.save'), onclick: () => void save() })),
       output);
   }

@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { RTC_FEC_MAX_PERCENT } from './webrtc.mjs';
 
 export const DEFAULT_PORT = 8091;
 export const DEFAULT_ENTRYPOINT = Object.freeze({ id: 'main', name: '', bind: '0.0.0.0', port: DEFAULT_PORT, https: true, proxy: { enabled: false, trusted: [] } });
@@ -210,7 +211,12 @@ export function validateWebrtc(input, fail = () => {}) {
   }
   let publicAddress = String(source.publicAddress || '').trim() || null;
   if (publicAddress && !/^[\w.:\[\]-]+$/.test(publicAddress) || (publicAddress && !parseHost(publicAddress).name)) { fail(`WebRTC 公网地址无效：${publicAddress}`); publicAddress = null; }
-  return { enabled: source.enabled !== false, port: checkedPort, publicAddress };
+  // Parity fragments as a share of the data fragments (webrtc.mjs): 0 = off.
+  const fecSource = source.fecPercent == null || source.fecPercent === '' ? 0 : Number(source.fecPercent);
+  let fecPercent = 0;
+  if (Number.isInteger(fecSource) && fecSource >= 0 && fecSource <= RTC_FEC_MAX_PERCENT) fecPercent = fecSource;
+  else fail(`WebRTC 冗余比例必须是 0 到 ${RTC_FEC_MAX_PERCENT}`);
+  return { enabled: source.enabled !== false, port: checkedPort, publicAddress, fecPercent };
 }
 
 // ----- certificates -----

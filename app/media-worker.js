@@ -32,6 +32,10 @@ importScripts('media.js');
   const postStats = () => {
     if (pipeline) post({ type: 'video-stats', stats: pipeline.stats });
     if (audioPipeline) post({ type: 'audio-stats', stats: audioPipeline.stats });
+    if (rtcReassembler.stats.recovered !== rtcRecoveredSent) {
+      rtcRecoveredSent = rtcReassembler.stats.recovered;
+      post({ type: 'rtc-stats', recovered: rtcRecoveredSent });
+    }
   };
 
   function open(message) {
@@ -100,19 +104,20 @@ importScripts('media.js');
   }
 
   // ----- WebRTC DataChannels (see webrtc.mjs) -----
-  // video: unordered fragments [u32 frame sequence][u16 index][u16 count][part of an envelope]; frames are
-  // reassembled and delivered in sequence. A gap waits up to RTC_REORDER_MS for a late (retransmitted) frame,
-  // then is skipped and reported as lost. audio: each message holds a packet and the one before it (a copy
-  // covering a lost message); the audio pipeline orders them and drops the duplicates.
-  const RTC_REORDER_MS = 150;
-  const RTC_PARTIAL_MS = 500;
-  const RTC_HEADER_BYTES = 8;
-  const rtcPartial = new Map(); // sequence -> { parts, received, bytes, firstAt }
+  // video: unordered fragments, reassembled (and rebuilt from parity, media.js createRtcReassembler) into frames
+  // delivered in sequence. A gap waits up to RTC_REORDER_MS for a late (retransmitted) frame, then is skipped
+  // and reported as lost: long enough for SCTP's retransmission over a VPS round trip, since skipping costs a
+  // keyframe round trip, which is longer. audio: each message holds a packet and the one before it (a copy covering a lost
+  // message); the audio pipeline orders them and drops the duplicates.
+  const RTC_REORDER_MS = 250;
+  const RTC_PARTIAL_MS = 1000;
+  const seqBefore = (a, b) => ((a - b) | 0) < 0;
   const rtcReady = new Map(); // sequence -> { data, at }
   let rtcExpected = null;
   let rtcBytes = 0; // fragment bytes not yet reported
   let rtcTimer = null;
-  const seqBefore = (a, b) => ((a - b) | 0) < 0;
+  const rtcReassembler = Media.createRtcReassembler({ isStale: (sequence) => rtcExpected != null && seqBefore(sequence, rtcExpected) });
+  let rtcRecoveredSent = 0;
 
   function attachRtc({ video, audio: audioChannel }) {
     for (const channel of [video, audioChannel]) channel.binaryType = 'arraybuffer';
@@ -132,43 +137,16 @@ importScripts('media.js');
   }
 
   function onVideoFragment(data) {
-    if (!(data instanceof ArrayBuffer) || data.byteLength <= RTC_HEADER_BYTES) return;
-    const view = new DataView(data);
-    const sequence = view.getUint32(0);
-    const index = view.getUint16(4);
-    const count = view.getUint16(6);
-    rtcBytes += data.byteLength;
-    if (rtcExpected != null && seqBefore(sequence, rtcExpected)) return; // gave up on it already
-    if (!count || index >= count) return;
+    if (data instanceof ArrayBuffer) rtcBytes += data.byteLength;
     const now = performance.now();
-    let entry = rtcPartial.get(sequence);
-    if (!entry) {
-      entry = { parts: new Array(count), received: 0, bytes: 0, firstAt: now };
-      rtcPartial.set(sequence, entry);
-    }
-    if (entry.parts[index]) return;
-    entry.parts[index] = new Uint8Array(data, RTC_HEADER_BYTES);
-    entry.received += 1;
-    entry.bytes += data.byteLength - RTC_HEADER_BYTES;
-    if (entry.received < count) return;
-    rtcPartial.delete(sequence);
-    let whole;
-    if (count === 1) {
-      whole = data.slice(RTC_HEADER_BYTES);
-    } else {
-      const bytes = new Uint8Array(entry.bytes);
-      let offset = 0;
-      for (const part of entry.parts) { bytes.set(part, offset); offset += part.length; }
-      whole = bytes.buffer;
-    }
-    rtcReady.set(sequence, { data: whole, at: now });
+    const frame = rtcReassembler.add(data, now);
+    if (!frame) return;
+    rtcReady.set(frame.sequence, { data: frame.data, at: now });
     drainRtc(now);
   }
 
   function drainRtc(now) {
-    for (const [sequence, entry] of rtcPartial) {
-      if (now - entry.firstAt > RTC_PARTIAL_MS) rtcPartial.delete(sequence);
-    }
+    rtcReassembler.expire(now, RTC_PARTIAL_MS);
     if (!rtcReady.size) return;
     if (rtcExpected == null) rtcExpected = [...rtcReady.keys()].reduce((a, b) => (seqBefore(b, a) ? b : a));
     let lost = 0;
@@ -187,7 +165,7 @@ importScripts('media.js');
       if (now - oldest < RTC_REORDER_MS) break;
       const next = [...rtcReady.keys()].reduce((a, b) => (seqBefore(b, a) ? b : a));
       lost += (next - rtcExpected) >>> 0;
-      for (const sequence of [...rtcPartial.keys()]) if (seqBefore(sequence, next)) rtcPartial.delete(sequence);
+      rtcReassembler.dropBefore(next);
       rtcExpected = next;
     }
   }

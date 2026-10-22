@@ -4,9 +4,13 @@
 // a packet lost on the way then costs only the frame it belonged to, instead of stalling everything behind
 // it until TCP has retransmitted it (head-of-line blocking), which is what made streams through a VPS stutter
 // while Moonlight (UDP) ran fine on the same path.
-//   - video: unordered, retransmitted for at most VIDEO_PACKET_LIFETIME_MS; frames are split into fragments of
-//     at most RTC_FRAGMENT_BYTES (SCTP messages are capped at 256 KB), each with an 8-byte header
-//     (u32 sequence number of the frame on this channel, u16 fragment index, u16 fragment count);
+//   - video: unordered, each message retransmitted at most VIDEO_MAX_RETRANSMITS times (a count, not a lifetime:
+//     SCTP starts a lifetime when the message is queued, so a big keyframe burst expired before it was even sent
+//     and the browser waited for one keyframe after another). Frames are split into fragments that fit one
+//     SCTP packet (RTC_FRAGMENT_BYTES + a 16-byte header, see RTC_FRAGMENT_HEADER_BYTES), so a lost packet costs
+//     one fragment instead of 60 KB, grouped into FEC blocks of at most RTC_BLOCK_FRAGMENTS like Sunshine's.
+//     Optional parity fragments per block (Reed-Solomon, as Sunshine's FEC) let the browser rebuild a block from
+//     any as many of its fragments as it has data fragments; the setting is fecPercent, 0 = off;
 //   - audio: unordered, retransmitted for at most AUDIO_PACKET_LIFETIME_MS (later it is useless); each message
 //     carries the packet and the one before it, so a lost message is covered by the next one.
 // The WebSocket stays: it carries signalling, input and stats, and media again whenever WebRTC is unavailable.
@@ -28,9 +32,17 @@ try {
   loadError = error;
 }
 
-export const RTC_FRAGMENT_BYTES = 60 * 1024;
-export const RTC_FRAGMENT_HEADER_BYTES = 8;
-export const VIDEO_PACKET_LIFETIME_MS = 150;
+// One fragment per SCTP packet: libdatachannel's default MTU (1280) less IPv6, UDP, DTLS, SCTP and DATA chunk
+// headers leaves about 1150 bytes for a message.
+export const RTC_FRAGMENT_BYTES = 1120;
+// u32 frame sequence, u32 envelope length, u16 first data fragment of the block, u16 data fragments in the block,
+// u16 parity fragments in the block, u16 index in the block (data first, then parity).
+export const RTC_FRAGMENT_HEADER_BYTES = 16;
+// Data fragments per FEC block. Encoding costs (parity fragments per block) table lookups per byte on the main
+// thread: 24 keeps 20 Mbps at 20 % FEC around 3 % of a core (64 took 15 %, and a keyframe blocked for 50 ms).
+export const RTC_BLOCK_FRAGMENTS = 24;
+export const RTC_FEC_MAX_PERCENT = 50;
+export const VIDEO_MAX_RETRANSMITS = 3;
 export const AUDIO_PACKET_LIFETIME_MS = 80;
 const GATHER_TIMEOUT_MS = 1500;
 const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -120,18 +132,70 @@ function addCandidates(sdp, addresses, port) {
   return `${lines.join('\r\n')}\r\n`;
 }
 
-// Split one video envelope into DataChannel messages.
-export function fragmentFrame(sequence, envelope) {
-  const count = Math.max(1, Math.ceil(envelope.length / RTC_FRAGMENT_BYTES));
+// GF(2^8) with polynomial 0x11d, the field Sunshine's FEC uses (media.js recoverShards decodes it).
+const GF_EXP = new Uint8Array(512);
+const GF_LOG = new Uint8Array(256);
+{
+  let x = 1;
+  for (let i = 0; i < 255; i += 1) {
+    GF_EXP[i] = x;
+    GF_LOG[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i += 1) GF_EXP[i] = GF_EXP[i - 255];
+}
+const gfInv = (a) => GF_EXP[255 - GF_LOG[a]];
+// GF_MUL[c][v] = c * v
+const GF_MUL = Array.from({ length: 256 }, (_, c) => {
+  const table = new Uint8Array(256);
+  if (c) for (let v = 1; v < 256; v += 1) table[v] = GF_EXP[GF_LOG[c] + GF_LOG[v]];
+  return table;
+});
+
+// Parity fragments for a block's data fragments: parity j = sum over i of INV[(m + i) ^ j] * data[i], the
+// Cauchy matrix of Sunshine's FEC. Data fragments are zero-padded to RTC_FRAGMENT_BYTES. Rounded up, so any
+// block gets at least one parity fragment while FEC is on.
+export function parityCount(dataCount, fecPercent) {
+  const percent = Math.min(RTC_FEC_MAX_PERCENT, Math.max(0, Number(fecPercent) || 0));
+  return Math.min(Math.ceil((dataCount * percent) / 100), 255 - dataCount);
+}
+
+function parityFragments(data, parities) {
+  const out = [];
+  for (let j = 0; j < parities; j += 1) {
+    const acc = Buffer.alloc(RTC_FRAGMENT_BYTES);
+    data.forEach((part, i) => {
+      const mul = GF_MUL[gfInv((parities + i) ^ j)];
+      for (let b = 0; b < part.length; b += 1) acc[b] ^= mul[part[b]];
+    });
+    out.push(acc);
+  }
+  return out;
+}
+
+// Split one video envelope into DataChannel messages, block by block: its data fragments, then its parity.
+// Blocks are made even in size so the last one isn't a lone fragment with a parity fragment of its own.
+export function fragmentFrame(sequence, envelope, fecPercent = 0) {
+  const total = Math.max(1, Math.ceil(envelope.length / RTC_FRAGMENT_BYTES));
+  const perBlock = Math.ceil(total / Math.ceil(total / RTC_BLOCK_FRAGMENTS));
   const messages = [];
-  for (let index = 0; index < count; index += 1) {
-    const part = envelope.subarray(index * RTC_FRAGMENT_BYTES, (index + 1) * RTC_FRAGMENT_BYTES);
-    const message = Buffer.allocUnsafe(RTC_FRAGMENT_HEADER_BYTES + part.length);
-    message.writeUInt32BE(sequence >>> 0, 0);
-    message.writeUInt16BE(index, 4);
-    message.writeUInt16BE(count, 6);
-    part.copy(message, RTC_FRAGMENT_HEADER_BYTES);
-    messages.push(message);
+  for (let first = 0; first < total; first += perBlock) {
+    const data = [];
+    for (let index = first; index < Math.min(total, first + perBlock); index += 1) data.push(envelope.subarray(index * RTC_FRAGMENT_BYTES, (index + 1) * RTC_FRAGMENT_BYTES));
+    const parities = parityCount(data.length, fecPercent);
+    const parts = parities ? [...data, ...parityFragments(data, parities)] : data;
+    parts.forEach((part, index) => {
+      const message = Buffer.allocUnsafe(RTC_FRAGMENT_HEADER_BYTES + part.length);
+      message.writeUInt32BE(sequence >>> 0, 0);
+      message.writeUInt32BE(envelope.length >>> 0, 4);
+      message.writeUInt16BE(first, 8);
+      message.writeUInt16BE(data.length, 10);
+      message.writeUInt16BE(parities, 12);
+      message.writeUInt16BE(index, 14);
+      part.copy(message, RTC_FRAGMENT_HEADER_BYTES);
+      messages.push(message);
+    });
   }
   return messages;
 }

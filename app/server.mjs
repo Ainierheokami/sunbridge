@@ -2030,9 +2030,9 @@ class MediaGatewayClient {
       return;
     }
     const target = webrtcTarget(settings, this.hostHeader);
-    const rtc = { pc: null, video: null, audio: null, ready: false, videoSequence: 0, lastAudio: null, disconnectedTimer: null };
+    const rtc = { pc: null, video: null, audio: null, ready: false, videoSequence: 0, lastAudio: null, disconnectedTimer: null, fecPercent: settings.fecPercent || 0 };
     this.rtc = rtc;
-    this.rtcStatus = { state: 'connecting', reason: null, port: target.port, publicHost: target.host };
+    this.rtcStatus = { state: 'connecting', reason: null, port: target.port, publicHost: target.host, fecPercent: rtc.fecPercent };
     try {
       const answer = await answerOffer({
         offer,
@@ -2089,7 +2089,7 @@ class MediaGatewayClient {
         rtc.lastAudio = envelope;
       } else {
         rtc.videoSequence = (rtc.videoSequence + 1) >>> 0;
-        for (const message of fragmentFrame(rtc.videoSequence, envelope)) rtc.video.sendMessageBinary(message);
+        for (const message of fragmentFrame(rtc.videoSequence, envelope, rtc.fecPercent)) rtc.video.sendMessageBinary(message);
       }
       this.sentBytes += envelope.length;
       return true;
@@ -2121,7 +2121,7 @@ class MediaGatewayClient {
 // UDP port and the address browsers should reach it at: settings, else the first entrypoint's port number
 // and the host name the browser used for the page (resolved to IPs by webrtc.mjs).
 function webrtcSettings() {
-  return netConfig.webrtc || { enabled: true, port: null, publicAddress: null };
+  return netConfig.webrtc || { enabled: true, port: null, publicAddress: null, fecPercent: 0 };
 }
 
 function webrtcTarget(settings, hostHeader) {
@@ -2540,7 +2540,7 @@ function buildAnnounceSdp(session, target, videoServerPort) {
     `a=x-nv-aqos.packetDuration:${session.audioPacketDurationMs || 5}`,
     `a=x-nv-general.useReliableUdp:${CONTROL_PROTOCOL_ENCRYPTED}`,
     'a=x-nv-general.featureFlags:135',
-    'a=x-nv-vqos[0].fec.minRequiredFecPackets:0',
+    'a=x-nv-vqos[0].fec.minRequiredFecPackets:2',
     `a=x-nv-vqos[0].bitStreamFormat:${VIDEO_CODECS[session.videoCodec] || 0}`,
     `a=x-nv-clientSupportHevc:${session.videoCodec === 'hevc' ? 1 : 0}`,
     'a=x-nv-vqos[0].qosTrafficType:5',
@@ -4030,7 +4030,7 @@ async function handleSettingsApi(request, response, pathname, body) {
     if (errors.length) { jsonResponse(response, 400, { ok: false, errorCode: 'NETWORK_INVALID', error: errors.join('；'), errors }); return; }
     netConfig = { ...netConfig, webrtc };
     saveNetConfig(DATA_DIR, netConfig);
-    LOG.info('settings', 'webrtc-changed', `WebRTC 设置已修改：${webrtc.enabled ? '开启' : '关闭'}，UDP 端口 ${webrtc.port || '同入口端口'}，公网地址 ${webrtc.publicAddress || '自动'}`, fields);
+    LOG.info('settings', 'webrtc-changed', `WebRTC 设置已修改：${webrtc.enabled ? '开启' : '关闭'}，UDP 端口 ${webrtc.port || '同入口端口'}，公网地址 ${webrtc.publicAddress || '自动'}，冗余 ${webrtc.fecPercent}%`, fields);
     jsonResponse(response, 200, { ok: true, ...networkSnapshot(request) });
     return;
   }
