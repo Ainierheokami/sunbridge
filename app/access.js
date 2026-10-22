@@ -32,7 +32,7 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (response.status === 401 && payload.errorCode === 'AUTH_REQUIRED') {
-      window.location.assign(`/login.html?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+      window.SunbridgeNavigation.goToLogin();
     }
     if (!response.ok || payload.ok === false) {
       const error = new Error(payload.error || `HTTP ${response.status}`);
@@ -359,7 +359,7 @@
     const poll = async () => {
       try {
         const response = await fetch('/api/auth/status', { cache: 'no-store' });
-        if (response.ok) { window.location.reload(); return; }
+        if (response.ok) { window.SunbridgeNavigation.forceNavigate(); return; }
       } catch { /* still down */ }
       if (Date.now() - startedAt > 90000) { output.textContent = t('access.restartSlow'); return; }
       setTimeout(poll, 1000);
@@ -519,7 +519,7 @@
   document.addEventListener('focusin', (event) => { state.typing = Boolean(event.target.closest?.('#accessView')); });
   document.addEventListener('focusout', () => { state.typing = false; });
   window.addEventListener('sunbridge:locale', () => { if (currentView === 'access') render({ background: true }); if (currentView === 'logs') renderLogs(); if (currentView === 'settings') renderService(); renderPendingBanner(); });
-  window.addEventListener('beforeunload', (event) => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });
+  window.addEventListener('beforeunload', (event) => { if (state.dirty && !window.sunbridgeLeaving) { event.preventDefault(); event.returnValue = ''; } });
 
   // A change may be pending from another tab or address: check once on load.
   const init = () => { if (!isDemo()) void loadNetwork().catch(() => {}); };

@@ -132,7 +132,7 @@
     scheduleUpdate();
   };
   const onBeforeUnload = (event) => {
-    if (!state.fullscreenAt && !(active() && state.held.size)) return;
+    if (window.sunbridgeLeaving || (!state.fullscreenAt && !(active() && state.held.size))) return;
     takenAway('unload');
     event.preventDefault();
     event.returnValue = '';

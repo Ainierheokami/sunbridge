@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue.svg" alt="License: GPLv3" /></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D18-339933.svg" alt="Node.js 18+" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22.23.4-339933.svg" alt="Node.js 22.23.4+" />
   <img src="https://img.shields.io/badge/codecs-AV1%20%7C%20HEVC%20%7C%20H.264-6cd9eb.svg" alt="AV1 / HEVC / H.264" />
   <a href="README.en.md">English</a>
 </p>
@@ -87,7 +87,7 @@ Sunbridge 负责与 Sunshine 配对、协商串流、接收媒体，并把画面
 
 ## 快速开始
 
-需要 [Node.js](https://nodejs.org/) 18 或更高版本（推荐 20+），以及一台运行 Sunshine 的主机。
+需要 [Node.js](https://nodejs.org/) 22.23.4+ / 24.22.1+ / 26.12.1+（更早的版本有已公开的安全漏洞，含远程代码执行），以及一台运行 Sunshine 的主机。
 
 ```bash
 git clone https://github.com/Ainierheokami/sunbridge.git

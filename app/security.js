@@ -30,7 +30,7 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (response.status === 401 && payload.errorCode === 'AUTH_REQUIRED') {
-      window.location.assign(`/login.html?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+      window.SunbridgeNavigation.goToLogin();
     }
     if (!response.ok || payload.ok === false) {
       const error = new Error(payload.error || `HTTP ${response.status}`);

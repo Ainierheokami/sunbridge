@@ -4,8 +4,8 @@ setlocal
 cd /d "%~dp0"
 where node >nul 2>nul
 if errorlevel 1 (
-  echo [Sunbridge] Node.js not found. Install Node.js 18+ from https://nodejs.org/ and try again.
-  echo [Sunbridge] 未找到 Node.js，请先安装 Node.js 18 或更高版本：https://nodejs.org/
+  echo [Sunbridge] Node.js not found. Install Node.js 24.22.1+ from https://nodejs.org/ and try again.
+  echo [Sunbridge] 未找到 Node.js，请先安装 Node.js 24.22.1 或更高版本：https://nodejs.org/
   pause
   exit /b 1
 )

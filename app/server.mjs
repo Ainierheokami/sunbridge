@@ -16,6 +16,7 @@ import { createLog, LOG_CATEGORIES } from './log.mjs';
 import { rtcSupport, answerOffer, fragmentFrame } from './webrtc.mjs';
 import * as Clipboard from './clipboard.mjs';
 import { createUpdater } from './update.mjs';
+import { nodeRuntimeStatus } from './runtime.mjs';
 import {
   loadConfig as loadNetConfig, saveConfig as saveNetConfig, validateConfig, environmentEntrypoint, makeAddressMatcher, isLoopbackAddress,
   hostAllowed, scanCertificates, pickCertificate, storeCertificate, deleteCertificate, nginxSnippet,
@@ -41,7 +42,7 @@ if (ENV_ENTRYPOINT) netConfig = { ...netConfig, entrypoints: [ENV_ENTRYPOINT] };
 const ENV_CERTIFICATES = process.env.SUNBRIDGE_TLS_CERT && process.env.SUNBRIDGE_TLS_KEY ? [{ cert: process.env.SUNBRIDGE_TLS_CERT, key: process.env.SUNBRIDGE_TLS_KEY }] : [];
 const EXTRA_ORIGINS = envList(process.env.SUNBRIDGE_ALLOWED_ORIGINS) || netConfig.allowedOrigins;
 const PUBLIC_PATHS = new Set(['/login.html', '/login.js', '/theme.js', '/assets/sunbridge-icon.svg', '/favicon.ico']);
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const updater = createUpdater({ appDir: ROOT, version: VERSION });
 const DEFAULT_HTTP_PORT = 47989;
 const DEFAULT_HTTPS_PORT = 47984;
@@ -84,6 +85,12 @@ const ASSUMED_FEC_PERCENT = 20;
 const DRAIN_ENTER_MS = 350;
 const DRAIN_EXIT_MS = 120;
 const DRAIN_MAX_MS = 5000;
+// A keyframe is several times a normal frame: queued, it alone can pass the backlog limit, and on a slow link
+// the frames behind it wait while it goes out. For KEYFRAME_GRACE_MS after one, the backlog it accounts for
+// (and the delay it takes to deliver at the measured rate) doesn't count as congestion; otherwise the frames
+// after it were dropped, which made it useless, a new keyframe was requested, and the loop went on.
+const KEYFRAME_GRACE_MS = 2000;
+const KEYFRAME_GRACE_MAX_DELAY_MS = 1500;
 const ABR_REMOTE_START_KBPS = 8000;
 const MEDIA_STATS_INTERVAL_MS = 1000;
 const MEDIA_GATEWAY_BATCH_BYTES = 256 * 1024;
@@ -1507,7 +1514,8 @@ function broadcastFrame(session, runtime, frame) {
   for (const client of mediaGatewayClients) {
     if (client.session !== session || !client.wantsFrames || !client.wantsVideo) continue;
     if (client.draining && Date.now() - client.draining > DRAIN_MAX_MS) stopDraining(client);
-    const congested = client.draining || client.mediaBacklogBytes() > backpressureLimit(session);
+    const backlog = client.mediaBacklogBytes();
+    const congested = client.draining || backlog > backpressureLimit(session) + client.keyframeGrace().bytes;
     if (congested || (client.skipToKeyframe && !keyframe)) {
       client.droppedFrames = (client.droppedFrames || 0) + 1;
       client.framesLostSinceSent = (client.framesLostSinceSent || 0) + 1;
@@ -1524,7 +1532,8 @@ function broadcastFrame(session, runtime, frame) {
     header.writeUInt32BE(receivedAt, 8);
     header.writeUInt32BE(body.length, 12);
     client.framesLostSinceSent = 0;
-    if (!client.queueMedia(Buffer.concat([header, body]))) removeMediaGatewayClient(client);
+    if (!client.queueMedia(Buffer.concat([header, body]))) { removeMediaGatewayClient(client); continue; }
+    if (keyframe) client.lastKeyframe = { at: Date.now(), bytes: Math.max(body.length, client.mediaBacklogBytes() - backlog) };
   }
 }
 
@@ -1998,7 +2007,7 @@ class MediaGatewayClient {
           receivedKbps: Math.max(0, Number(message.receivedKbps) || 0),
           lostFrames: Number(message.lostFrames) || 0,
         };
-        if (!this.draining && this.feedback.queueDelayMs > DRAIN_ENTER_MS) {
+        if (!this.draining && this.feedback.queueDelayMs > DRAIN_ENTER_MS + this.keyframeGrace().delayMs) {
           this.draining = Date.now();
           this.drainEpisodes = (this.drainEpisodes || 0) + 1;
         } else if (this.draining && this.feedback.queueDelayMs < DRAIN_EXIT_MS) {
@@ -2008,6 +2017,15 @@ class MediaGatewayClient {
         this.sendJson({ type: 'pong', id: message.id ?? null, t: message.t ?? null });
       }
     } catch { /* subscription metadata is optional */ }
+  }
+
+  // Backlog and queueing delay the last keyframe accounts for, while it is recent (see KEYFRAME_GRACE_MS).
+  keyframeGrace() {
+    const last = this.lastKeyframe;
+    if (!last || Date.now() - last.at > KEYFRAME_GRACE_MS) return { bytes: 0, delayMs: 0 };
+    const kbps = this.feedback?.receivedKbps || 0;
+    const delayMs = kbps > 0 ? Math.min(KEYFRAME_GRACE_MAX_DELAY_MS, (last.bytes * 8) / kbps) : KEYFRAME_GRACE_MAX_DELAY_MS;
+    return { bytes: last.bytes, delayMs };
   }
 
   cleanup() {
@@ -2218,6 +2236,22 @@ function removeMediaGatewayClient(client) {
   }
 }
 
+// The login is checked when a socket opens; without this a socket outlives a logout, a password change (which
+// signs out the other devices) or an expiry, and the page can keep its stream and input open by cancelling the
+// leave-page prompt that the redirect to the login page raises. Media, WebRTC and input stop here, whatever
+// the page does; it is told to go to the login page (close code 4401).
+const AUTH_RECHECK_MS = 5000;
+function closeSignedOutClients() {
+  for (const client of [...mediaGatewayClients]) {
+    if (client.authSessionId && auth.sessionActive(client.authSessionId)) continue;
+    LOG.warn('auth', 'stream-signed-out', '登录已失效，已断开该浏览器的串流');
+    client.close(4401, 'Login required');
+    client.cleanup();
+    setTimeout(() => client.socket.destroy(), 1000).unref?.();
+  }
+}
+setInterval(closeSignedOutClients, AUTH_RECHECK_MS).unref();
+
 function closeMediaGatewayClients(session, code = 1000, reason = '') {
   for (const client of [...mediaGatewayClients]) {
     if (client.session === session) client.close(code, reason);
@@ -2255,6 +2289,7 @@ function acceptMediaGateway(request, socket, head) {
   const accept = crypto.createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: ${MEDIA_GATEWAY_PROTOCOL}\r\n\r\n`);
   const client = new MediaGatewayClient(socket, activeSession);
+  client.authSessionId = auth.sessionFor(request)?.id || null;
   // The address the browser used for the page (through a trusted proxy: the one it forwarded).
   client.hostHeader = auth.effectiveHost(request) || '';
   mediaGatewayClients.add(client);
@@ -3000,7 +3035,8 @@ async function diagnoseHost(host) {
     });
     add('bridge.webrtc', 'bridge', bindable === true ? 'ok' : 'fail', bindable === true ? `WebRTC 可用，UDP 端口 ${udpPort}${inUse ? '（正在使用）' : ''}` : `UDP 端口 ${udpPort} ${bindable}：在访问设置里换一个端口`);
   }
-  add('bridge.runtime', 'bridge', 'info', `Sunbridge ${VERSION} · Node.js ${process.version} · ${process.platform}-${process.arch}`);
+  const runtime = nodeRuntimeStatus();
+  add('bridge.runtime', 'bridge', runtime.secure ? 'info' : 'warn', `Sunbridge ${VERSION} · Node.js ${process.version} · ${process.platform}-${process.arch}${runtime.secure ? '' : `：${runtime.detail}`}`);
   return { checks, ...ping };
 }
 
@@ -3618,6 +3654,7 @@ async function handleApi(request, response, pathname) {
   if (pathname === '/api/auth/logout' && request.method === 'POST') {
     if (auth.sessionFor(request)) LOG.info('auth', 'logout', '已退出登录', requestFields(request));
     response.setHeader('Set-Cookie', auth.logout(request));
+    closeSignedOutClients();
     jsonResponse(response, 200, { ok: true });
     return;
   }
@@ -3629,6 +3666,7 @@ async function handleApi(request, response, pathname) {
       return;
     }
     LOG.info('auth', 'password-changed', '已修改登录密码，其他设备已退出', requestFields(request));
+    closeSignedOutClients();
     jsonResponse(response, 200, { ok: true });
     return;
   }

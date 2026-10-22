@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue.svg" alt="License: GPLv3" /></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D18-339933.svg" alt="Node.js 18+" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22.23.4-339933.svg" alt="Node.js 22.23.4+" />
   <img src="https://img.shields.io/badge/codecs-AV1%20%7C%20HEVC%20%7C%20H.264-6cd9eb.svg" alt="AV1 / HEVC / H.264" />
   <a href="README.md">中文</a>
 </p>
@@ -74,7 +74,7 @@ Sunbridge pairs with Sunshine, negotiates the stream and receives the media, the
 
 ## Quick start
 
-Requires [Node.js](https://nodejs.org/) 18+ (20+ recommended) and a host running Sunshine.
+Requires [Node.js](https://nodejs.org/) 22.23.4+ / 24.22.1+ / 26.12.1+ (older releases have known security vulnerabilities, including remote code execution) and a host running Sunshine.
 
 ```bash
 git clone https://github.com/Ainierheokami/sunbridge.git

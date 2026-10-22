@@ -12,6 +12,7 @@ import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { disableTwoFactor, loadAuthState, normalizePolicy, saveAuthState, setupCodeFile } from '../auth.mjs';
 import { defaultConfig, environmentEntrypoint, loadConfig, saveConfig } from '../netconfig.mjs';
+import { nodeRuntimeStatus, PATCHED_VERSIONS } from '../runtime.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = process.env.SUNBRIDGE_DATA_DIR ? path.resolve(process.env.SUNBRIDGE_DATA_DIR) : path.join(ROOT, '..', 'data');
@@ -338,11 +339,12 @@ async function menu() {
   }
 }
 
-const [major] = process.versions.node.split('.').map(Number);
-if (major < 18) {
-  console.error(red(`需要 Node.js 18 或更高版本，当前是 ${process.version}。`));
+const runtime = nodeRuntimeStatus();
+if (!runtime.supported) {
+  console.error(red(`${runtime.detail}。推荐 ${PATCHED_VERSIONS.join(' / ')} 或更高版本：https://nodejs.org/`));
   process.exit(1);
 }
+if (!runtime.secure) console.error(yellow(`警告：${runtime.detail}。`));
 
 const command = process.argv[2];
 if (!command) {

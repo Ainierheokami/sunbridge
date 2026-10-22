@@ -6,6 +6,16 @@
     { id: 'demo-studio', name: 'Studio NUC', address: '192.168.1.76', os: 'Windows 11', sunshine: '0.23-demo', gpu: 'RTX 3060 Ti', state: 'sleeping', paired: true, lastSeen: 'demo', mac: '00:11:22:33:44:55', apps: [{ id: 1, name: 'Desktop' }] },
   ];
 
+  // Navigation the bridge requires (signed out, restarted): no "leave this page?" prompt may cancel it, since
+  // staying would keep a stream the login no longer allows. The pages' beforeunload handlers check the flag.
+  const forceNavigate = (url) => {
+    window.sunbridgeLeaving = true;
+    if (url) window.location.assign(url);
+    else window.location.reload();
+  };
+  const goToLogin = () => forceNavigate(`/login.html?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+  window.SunbridgeNavigation = { forceNavigate, goToLogin };
+
   class SunbridgeClient {
     constructor() {
       this.demo = new URLSearchParams(window.location.search).get('demo') === '1';
@@ -42,7 +52,7 @@
         try { payload = await response.json(); } catch { payload = {}; }
         if (response.status === 401 && payload.errorCode === 'AUTH_REQUIRED') {
           // Session expired or revoked: go back to the login page and return here afterwards.
-          window.location.assign(`/login.html?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+          goToLogin();
         }
         if (!response.ok || payload.ok === false) {
           const error = new Error(payload.error || `Bridge request failed (${response.status})`);
@@ -72,7 +82,7 @@
       if (!this.demo) {
         try { await this.request('/api/auth/logout', { method: 'POST' }); } catch { /* go to the login page anyway */ }
       }
-      window.location.assign('/login.html');
+      forceNavigate('/login.html');
     }
 
     async healthCheck() {

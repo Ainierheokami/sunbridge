@@ -503,6 +503,16 @@ export function createAuth({ dataDir, extraOrigins = [] }) {
       return { ok: true, username: state.user.username, cookie: created.cookie, method: used.method, recoveryRemaining: used.recoveryRemaining };
     },
 
+    // Whether a login session is still valid (not logged out, revoked or expired). An open stream counts as use.
+    sessionActive(id) {
+      reload();
+      const now = Date.now();
+      const session = state.user && state.sessions.find((item) => item.id === id);
+      if (!session || session.expiresAt <= now || now - session.lastSeenAt >= SESSION_IDLE_MS) return false;
+      session.lastSeenAt = now;
+      return true;
+    },
+
     logout(request) {
       const token = parseCookies(request.headers.cookie)[SESSION_COOKIE];
       if (token) {

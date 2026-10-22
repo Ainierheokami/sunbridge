@@ -97,7 +97,7 @@
     };
     on(fab, 'pointerup', endDrag);
     on(fab, 'pointercancel', endDrag);
-    on(window, 'resize', () => place());
+    on(window, 'resize', () => { place(); if (!keybar.hidden) placeKeys(); });
 
     // ----- menu -----
     const item = (action, icon, label, extra = '') => `<button type="button" role="menuitem" data-touch-action="${action}"${extra}><span data-icon="${icon}" aria-hidden="true"></span><span>${label}</span></button>`;
@@ -136,9 +136,10 @@
     // ----- key bar, above the soft keyboard -----
     const placeKeys = () => {
       const viewport = window.visualViewport;
-      // How much of the layout viewport the on-screen keyboard covers.
-      const covered = viewport ? Math.max(0, window.innerHeight - (viewport.offsetTop + viewport.height)) : 0;
-      keybar.style.bottom = covered + 'px';
+      // The bottom of what is visible, from the same visual viewport snapshot: anchoring to innerHeight instead
+      // left a gap or a hidden bar when the URL bar or the page scroll moved while the keyboard came up.
+      const bottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+      keybar.style.top = Math.max(0, bottom - keybar.offsetHeight) + 'px';
     };
     const keysOpen = () => document.activeElement === keyboardInput;
     const renderKeys = () => {

@@ -1736,6 +1736,8 @@
       },
       onClose: (info) => {
         if (generation !== state.mediaGatewayGeneration) return;
+        // Signed out (logout elsewhere, password changed, expired): the bridge has already stopped this stream.
+        if (info?.code === 4401) { stopMediaGateway(); window.SunbridgeNavigation?.goToLogin(); return; }
         if (info?.expected && state.stopping) return;
         if (state.mediaGatewayState === 'connected') state.mediaGatewayState = 'disconnected';
         queueStreamRender();
@@ -2616,7 +2618,7 @@
   });
   // Ctrl+W, Ctrl+R and the like can't be kept from the browser outside fullscreen: ask before leaving a stream.
   window.addEventListener('beforeunload', (event) => {
-    if (!state.streamSession || state.stopping || qs('#streamOverlay')?.hidden) return;
+    if (window.sunbridgeLeaving || !state.streamSession || state.stopping || qs('#streamOverlay')?.hidden) return;
     event.preventDefault();
     event.returnValue = '';
   });
