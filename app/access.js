@@ -350,6 +350,34 @@
       output);
   }
 
+  // ----- Idle disconnect (netconfig.mjs validateIdle) --------------------------------------------------
+  function idleCard() {
+    const info = state.network.idle;
+    if (!info) return null;
+    const minutes = (value) => h('input', { type: 'number', min: '0', max: '10080', step: '1', value: String(value ?? 0) });
+    const input = minutes(info.inputMinutes);
+    const viewer = minutes(info.viewerMinutes);
+    const max = minutes(info.maxMinutes);
+    const output = h('p', { class: 'security-message', role: 'status' });
+    const save = async () => {
+      const password = await askPassword(t('access.idleTitle'), t('access.idleSaveCopy'));
+      if (password == null) return;
+      try {
+        const result = await call('/api/settings/idle', { password, idle: { inputMinutes: Number(input.value) || 0, viewerMinutes: Number(viewer.value) || 0, maxMinutes: Number(max.value) || 0 } });
+        state.network = { ...state.network, ...result };
+        render();
+      } catch (error) { output.textContent = error.message; }
+    };
+    return card(t('access.idleTitle'), t('access.idleCaption'),
+      h('p', { class: 'host-hint', text: t('access.idleHint') }),
+      h('div', { class: 'entry-grid' },
+        h('label', { class: 'host-field' }, h('span', { text: t('access.idleInput') }), h('div', { class: 'input-shell' }, input)),
+        h('label', { class: 'host-field' }, h('span', { text: t('access.idleViewer') }), h('div', { class: 'input-shell' }, viewer)),
+        h('label', { class: 'host-field' }, h('span', { text: t('access.idleMax') }), h('div', { class: 'input-shell' }, max))),
+      h('div', { class: 'dialog-actions' }, h('button', { class: 'primary-button', type: 'button', text: t('access.save'), onclick: () => void save() })),
+      output);
+  }
+
   // ----- Settings → Sunbridge service: version, updates, restart (update.mjs) --------------------------
   // Restarting (or updating, which restarts) keeps the stream on the host running; this page reloads once the
   // bridge answers again.
@@ -458,7 +486,7 @@
     const view = document.getElementById('accessView');
     if (!view || !state.network) return;
     if (background && state.typing) return;
-    view.replaceChildren(h('div', { class: 'settings-layout' }, currentCard(), entrypointsCard(), hostsCard(), saveBar(), certificatesCard(), nginxCard(), webrtcCard()));
+    view.replaceChildren(h('div', { class: 'settings-layout' }, currentCard(), entrypointsCard(), hostsCard(), saveBar(), certificatesCard(), nginxCard(), webrtcCard(), idleCard()));
     icons(view);
   }
 

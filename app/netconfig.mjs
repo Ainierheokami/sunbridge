@@ -3,7 +3,8 @@
 //   { version: 2,
 //     entrypoints: [{ id, name, bind, port, https, proxy: { enabled, trusted: [ip | cidr] } }],
 //     allowedHosts: ["example.com", "b.example.com:8443", "*.example.net"],   // empty: any address
-//     allowedOrigins: [...], certificateNames: [...], extraCertificates: [{ cert, key }] }   // carried over from v1
+//     allowedOrigins: [...], certificateNames: [...], extraCertificates: [{ cert, key }],   // carried over from v1
+//     webrtc: { enabled, port, publicAddress, fecPercent }, idle: { inputMinutes, viewerMinutes, maxMinutes } }
 // An entrypoint is one listening socket. With https on, it serves the certificate in <data>/certs that matches
 // the requested domain (SNI), or a self-signed one. With a reverse proxy, only the listed proxy addresses may
 // connect to it and their X-Forwarded-* headers are trusted. Entrypoints can be mixed freely: e.g. a loopback
@@ -194,6 +195,7 @@ export function validateConfig(input, { lenient = false } = {}) {
     certificateNames: strings(source.certificateNames),
     extraCertificates: (Array.isArray(source.extraCertificates) ? source.extraCertificates : []).filter((item) => item?.cert && item?.key).map((item) => ({ cert: String(item.cert), key: String(item.key) })).slice(0, 16),
     webrtc: validateWebrtc(source.webrtc, fail),
+    idle: validateIdle(source.idle, fail),
   };
   return { config, errors: lenient ? [] : errors };
 }
@@ -217,6 +219,21 @@ export function validateWebrtc(input, fail = () => {}) {
   if (Number.isInteger(fecSource) && fecSource >= 0 && fecSource <= RTC_FEC_MAX_PERCENT) fecPercent = fecSource;
   else fail(`WebRTC 冗余比例必须是 0 到 ${RTC_FEC_MAX_PERCENT}`);
   return { enabled: source.enabled !== false, port: checkedPort, publicAddress, fecPercent };
+}
+
+// Ending a stream nobody is using (server.mjs, checkIdleSession), in minutes, 0 = never: no keyboard, mouse,
+// touch or gamepad input; no browser showing it (tab closed, phone asleep); or simply streamed this long.
+export const DEFAULT_IDLE = Object.freeze({ inputMinutes: 30, viewerMinutes: 10, maxMinutes: 0 });
+const IDLE_MAX_MINUTES = 7 * 24 * 60;
+export function validateIdle(input, fail = () => {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  const minutes = (name, label) => {
+    const value = source[name] == null || source[name] === '' ? DEFAULT_IDLE[name] : Number(source[name]);
+    if (Number.isInteger(value) && value >= 0 && value <= IDLE_MAX_MINUTES) return value;
+    fail(`${label}必须是 0 到 ${IDLE_MAX_MINUTES} 分钟`);
+    return DEFAULT_IDLE[name];
+  };
+  return { inputMinutes: minutes('inputMinutes', '无操作断开时间'), viewerMinutes: minutes('viewerMinutes', '无人观看断开时间'), maxMinutes: minutes('maxMinutes', '最长串流时间') };
 }
 
 // ----- certificates -----

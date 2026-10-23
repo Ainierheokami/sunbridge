@@ -1826,6 +1826,10 @@
           renderStream('stopped');
           return;
         }
+        if (event.type === 'session-idle-warning' && event.reason) {
+          const seconds = Math.max(1, Math.round((Date.parse(event.endsAt) - Date.now()) / 1000));
+          showToast(t('session.idleWarning'), t(event.reason === 'max' ? 'session.idleWarningMax' : 'session.idleWarningInput', { seconds }), 'warning');
+        }
         if (event.type === 'session-reconnecting') { state.reconnect = { source: 'host', attempt: event.attempt, max: 7, reason: event.reason }; renderReconnect(); }
         if (event.session) state.streamSession = { ...(state.streamSession || {}), ...event.session };
         if (state.streamSession) queueStreamRender();
@@ -2163,6 +2167,9 @@
     HOST_DISCONNECTED: 'reconnect.hostDisconnected',
     HOST_APP_EXITED: 'reconnect.appExited',
     RECONNECT_FAILED: 'reconnect.failed',
+    IDLE_NO_INPUT: 'reconnect.idleInput',
+    IDLE_NO_VIEWER: 'reconnect.idleViewer',
+    IDLE_MAX_DURATION: 'reconnect.idleMax',
   };
   const endedReasonKey = (errorCode) => ENDED_REASON_KEYS[errorCode] || 'reconnect.failed';
   // The session ended without the user stopping it here (host app exited, reconnect gave up, replaced).

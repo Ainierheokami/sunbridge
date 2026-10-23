@@ -394,7 +394,7 @@
         'session-snapshot', 'session-started', 'rtsp-probing', 'rtsp-options',
         'rtsp-describe', 'rtsp-setup', 'rtsp-announce', 'rtsp-negotiated',
         'media-first-packet', 'media-stats', 'media-gateway', 'media-gateway-stats', 'session-failed', 'session-stopped',
-        'session-reconnecting', 'session-reconnected', 'session-resized', 'session-terminated',
+        'session-reconnecting', 'session-reconnected', 'session-resized', 'session-terminated', 'session-idle-warning',
         'input-connecting', 'input-connected', 'input-disconnected', 'input-failed',
       ];
       let closed = false;

@@ -20,7 +20,7 @@ import { nodeRuntimeStatus } from './runtime.mjs';
 import {
   loadConfig as loadNetConfig, saveConfig as saveNetConfig, validateConfig, environmentEntrypoint, makeAddressMatcher, isLoopbackAddress,
   hostAllowed, scanCertificates, pickCertificate, storeCertificate, deleteCertificate, nginxSnippet,
-  parseHost, validateWebrtc, DEFAULT_PORT as DEFAULT_ENTRY_PORT,
+  parseHost, validateWebrtc, validateIdle, DEFAULT_IDLE, DEFAULT_PORT as DEFAULT_ENTRY_PORT,
 } from './netconfig.mjs';
 import tls from 'node:tls';
 // The browser's media code (RTP / FEC / frame assembly) also runs here: the bridge assembles video frames itself.
@@ -2138,6 +2138,64 @@ class MediaGatewayClient {
 
 // UDP port and the address browsers should reach it at: settings, else the first entrypoint's port number
 // and the host name the browser used for the page (resolved to IPs by webrtc.mjs).
+// Idle disconnect (netconfig.mjs validateIdle): end the stream, as the stop button does, when nobody has
+// touched it, nobody is watching it, or it has run for the longest allowed time. Browsers get a warning a
+// minute before; any input in that minute keeps the stream.
+const IDLE_CHECK_MS = 5000;
+const IDLE_WARNING_MS = 60000;
+const IDLE_REASONS = {
+  input: { code: 'IDLE_NO_INPUT', log: (minutes) => `${minutes} 分钟没有操作` },
+  viewer: { code: 'IDLE_NO_VIEWER', log: (minutes) => `${minutes} 分钟没有浏览器在看` },
+  max: { code: 'IDLE_MAX_DURATION', log: (minutes) => `已串流 ${minutes} 分钟（最长时间）` },
+};
+function idleSettings() {
+  return netConfig.idle || { ...DEFAULT_IDLE };
+}
+
+function markSessionActive(session) {
+  session.idleInputAt = Date.now();
+  if (session.idleWarning === 'input') {
+    session.idleWarning = null;
+    emitSessionEvent('session-idle-warning', { reason: null, endsAt: null });
+  }
+}
+
+let idleStopping = false;
+function checkIdleSession() {
+  const session = activeSession;
+  if (!session || idleStopping || session.reconnect) return;
+  const now = Date.now();
+  const settings = idleSettings();
+  session.idleInputAt ??= now;
+  if (mediaGatewayClientCount(session)) session.idleNoViewerSince = null;
+  else session.idleNoViewerSince ??= now;
+  // When each limit runs out; the earliest one wins.
+  const deadlines = [];
+  if (settings.inputMinutes) deadlines.push(['input', session.idleInputAt + settings.inputMinutes * 60000, settings.inputMinutes]);
+  if (settings.viewerMinutes && session.idleNoViewerSince) deadlines.push(['viewer', session.idleNoViewerSince + settings.viewerMinutes * 60000, settings.viewerMinutes]);
+  if (settings.maxMinutes) deadlines.push(['max', Date.parse(session.startedAt) + settings.maxMinutes * 60000, settings.maxMinutes]);
+  deadlines.sort((a, b) => a[1] - b[1]);
+  const [reason, endsAt, minutes] = deadlines[0] || [];
+  if (!reason || endsAt - now > IDLE_WARNING_MS) {
+    if (session.idleWarning) { session.idleWarning = null; emitSessionEvent('session-idle-warning', { reason: null, endsAt: null }); }
+    return;
+  }
+  if (endsAt > now) {
+    // Nobody is watching to see a "no viewer" warning.
+    if (reason !== 'viewer' && session.idleWarning !== reason) {
+      session.idleWarning = reason;
+      emitSessionEvent('session-idle-warning', { reason, endsAt: new Date(endsAt).toISOString() });
+    }
+    return;
+  }
+  idleStopping = true;
+  LOG.info('stream', 'idle-stop', `自动结束串流：${IDLE_REASONS[reason].log(minutes)} · ${session.appName || ''} · ${session.hostName || ''}`);
+  void stopSession(IDLE_REASONS[reason].code)
+    .catch((error) => LOG.warn('stream', 'idle-stop-failed', `自动结束串流失败：${safeError(error)}`))
+    .finally(() => { idleStopping = false; });
+}
+setInterval(checkIdleSession, IDLE_CHECK_MS).unref();
+
 function webrtcSettings() {
   return netConfig.webrtc || { enabled: true, port: null, publicAddress: null, fecPercent: 0 };
 }
@@ -2653,6 +2711,7 @@ function handleBrowserInput(session, message) {
   }
   input.packets = (input.packets || 0) + sent;
   input.lastInputAt = new Date().toISOString();
+  if (sent) markSessionActive(session);
   input.rttMs = control.rtt;
   const now = performance.now();
   if (!input.lastEventAt || now - input.lastEventAt >= INPUT_EVENT_THROTTLE_MS) {
@@ -3454,7 +3513,8 @@ function resizeSession(input = {}) {
   return { method: 'reconnect', width, height };
 }
 
-async function stopSession() {
+// endCode: why the bridge ended it by itself (idle disconnect); browsers show the matching message.
+async function stopSession(endCode = null) {
   const previous = activeSession;
   if (!previous) return { stopped: false, session: null };
   previous.reconnect = null;
@@ -3481,7 +3541,7 @@ async function stopSession() {
   }
   closeMediaGatewayClients(previous, 1000, 'session stopped');
   activeSession = null;
-  emitSessionEvent('session-stopped', { session: previous, errorCode: failure?.errorCode || null, error: failure ? safeError(failure) : null });
+  emitSessionEvent('session-stopped', { session: previous, errorCode: endCode || failure?.errorCode || null, error: failure ? safeError(failure) : null });
   if (failure) throw failure;
   return { stopped: true, session: previous, response: response ? { cancel: xmlText(response.body, 'cancel', null) } : null };
 }
@@ -3939,6 +3999,7 @@ function networkSnapshot(request) {
       const target = webrtcTarget(settings, auth.effectiveHost(request));
       return { settings, support: rtcSupport(settings), target: { host: target.host, port: target.publicPort, udpPort: target.port } };
     })(),
+    idle: idleSettings(),
   };
 }
 
@@ -4069,6 +4130,17 @@ async function handleSettingsApi(request, response, pathname, body) {
     netConfig = { ...netConfig, webrtc };
     saveNetConfig(DATA_DIR, netConfig);
     LOG.info('settings', 'webrtc-changed', `WebRTC 设置已修改：${webrtc.enabled ? '开启' : '关闭'}，UDP 端口 ${webrtc.port || '同入口端口'}，公网地址 ${webrtc.publicAddress || '自动'}，冗余 ${webrtc.fecPercent}%`, fields);
+    jsonResponse(response, 200, { ok: true, ...networkSnapshot(request) });
+    return;
+  }
+  if (pathname === '/api/settings/idle') {
+    const errors = [];
+    const idle = validateIdle(body.idle, (message) => errors.push(message));
+    if (errors.length) { jsonResponse(response, 400, { ok: false, errorCode: 'NETWORK_INVALID', error: errors.join('；'), errors }); return; }
+    netConfig = { ...netConfig, idle };
+    saveNetConfig(DATA_DIR, netConfig);
+    const label = (minutes) => (minutes ? `${minutes} 分钟` : '关闭');
+    LOG.info('settings', 'idle-changed', `自动断开设置已修改：无操作 ${label(idle.inputMinutes)}，无人观看 ${label(idle.viewerMinutes)}，最长串流 ${label(idle.maxMinutes)}`, fields);
     jsonResponse(response, 200, { ok: true, ...networkSnapshot(request) });
     return;
   }
