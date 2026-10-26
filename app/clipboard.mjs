@@ -98,14 +98,21 @@ export function createEchoFilter() {
 }
 
 // Host clipboard content waiting for browsers to fetch it (images, large text): the last few items, briefly.
+// put() takes the bytes, or a function loading them (a host blob, downloaded only once a browser asks for it);
+// an item's data() resolves the bytes, loading them once for every browser that asks. A failed load is retried
+// by the next request.
 export function createStore() {
   const items = new Map(); // id -> { data, mime, at }
   return {
-    put(data, mime) {
+    put(source, mime) {
       const now = Date.now();
       for (const [id, item] of items) if (now - item.at > STORE_TTL_MS) items.delete(id);
       while (items.size >= STORE_MAX_ITEMS) items.delete(items.keys().next().value);
       const id = crypto.randomBytes(12).toString('base64url');
+      let loading = null;
+      const data = typeof source === 'function'
+        ? () => (loading ||= source().catch((error) => { loading = null; throw error; }))
+        : () => Promise.resolve(source);
       items.set(id, { data, mime, at: now });
       return id;
     },

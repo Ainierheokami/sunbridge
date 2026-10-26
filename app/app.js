@@ -52,10 +52,11 @@
     streamHost: null,
     streamApp: null,
     settings: (() => {
-      // resolution: 'auto' (follow the window) or 'WxH'; controlMode: auto | desktop | game; bitrateMode: auto | fixed.
+      // resolution: 'auto' (follow the window) or 'WxH'; controlMode: auto | desktop | game; bitrateMode: auto | fixed;
+      // clipboardConfirm: MB from which clipboard transfers ask first ('1' | '4' | '16'), or 'never'.
       let saved = {};
       try { saved = JSON.parse(localStorage.getItem('sunbridge.settings.v1') || '{}') || {}; } catch { saved = {}; }
-      return { resolution: 'auto', width: 1920, height: 1080, fps: 60, controlMode: 'auto', bitrateMode: 'auto', codec: 'auto', ...saved };
+      return { resolution: 'auto', width: 1920, height: 1080, fps: 60, controlMode: 'auto', bitrateMode: 'auto', codec: 'auto', clipboardConfirm: '4', ...saved };
     })(),
     activity: [],
     loading: true,
@@ -158,28 +159,75 @@
 
   const formatBytes = (bytes) => bytes >= 1024 * 1024 ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' KB';
 
-  // Bottom-left progress of a large clipboard upload (clipboard.js onProgress); fades out once it ends.
+  // Bottom-left progress of a large clipboard transfer either way (clipboard.js onProgress), with a button that
+  // cancels it; fades out once it ends.
   let clipboardProgressTimer = null;
-  const renderClipboardProgress = ({ phase, mime, loaded = 0, total = 0 }) => {
+  const renderClipboardProgress = ({ phase, direction = 'send', mime, loaded = 0, total = 0 }) => {
     const box = qs('#streamTransfer');
     if (!box) return;
     clearTimeout(clipboardProgressTimer);
     box.classList.remove('is-leaving');
+    if (phase === 'idle') { box.hidden = true; return; }
     box.hidden = false;
-    box.dataset.phase = phase;
-    qs('.stream-transfer-label', box).textContent = t(mime === 'text/plain' ? 'clipboard.progress.text' : 'clipboard.progress.image');
+    const receiving = direction === 'receive';
+    // A download that has no bytes yet waits for the bridge to fetch it from the host.
+    box.dataset.phase = phase === 'download' && !loaded ? 'fetch' : phase;
+    box.dataset.direction = direction;
+    qs('.stream-transfer-label', box).textContent = t(`clipboard.progress.${receiving ? 'receive' : 'send'}${mime === 'text/plain' ? 'Text' : 'Image'}`);
     const percent = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
-    qs('.stream-transfer-value', box).textContent = phase === 'upload' ? `${percent}% · ${formatBytes(loaded)} / ${formatBytes(total)}`
+    qs('.stream-transfer-value', box).textContent = phase === 'upload' || (phase === 'download' && loaded) ? `${percent}% · ${formatBytes(loaded)} / ${formatBytes(total)}`
+      : phase === 'download' ? t('clipboard.progress.fetch')
+      : phase === 'prepare' ? t('clipboard.progress.prepare')
       : phase === 'host' ? t('clipboard.progress.host')
-      : phase === 'done' ? `${t('clipboard.progress.done')} · ${formatBytes(total)}`
+      : phase === 'done' ? `${t(receiving ? 'clipboard.progress.received' : 'clipboard.progress.done')} · ${formatBytes(total)}`
+      : phase === 'cancelled' ? t('clipboard.progress.cancelled')
       : t('clipboard.progress.failed');
-    qs('.stream-transfer-track i', box).style.width = phase === 'upload' ? percent + '%' : '';
-    if (phase === 'done' || phase === 'failed') {
+    qs('.stream-transfer-track i', box).style.width = phase === 'upload' || phase === 'download' ? percent + '%' : '';
+    const cancel = qs('.stream-transfer-cancel', box);
+    cancel.title = t('clipboard.cancel');
+    cancel.setAttribute('aria-label', t('clipboard.cancel'));
+    if (phase === 'done' || phase === 'failed' || phase === 'cancelled') {
       clipboardProgressTimer = setTimeout(() => {
         box.classList.add('is-leaving');
         clipboardProgressTimer = setTimeout(() => { box.hidden = true; box.classList.remove('is-leaving'); }, 220);
       }, phase === 'done' ? 1200 : 2500);
     }
+  };
+
+  // Clipboard content at or over the size setting waits for an answer here (clipboard.js onConfirm): send it,
+  // send an image scaled down, receive it, or not. A newer question closes the one before it unanswered.
+  const clipboardConfirmBytes = () => {
+    const mb = Number(state.settings.clipboardConfirm);
+    return state.settings.clipboardConfirm === 'never' || !(mb > 0) ? Infinity : mb * 1024 * 1024;
+  };
+  let transferAsk = null; // resolve() of the open question
+  const answerTransfer = (answer) => {
+    const resolve = transferAsk;
+    if (!resolve) return;
+    transferAsk = null;
+    const box = qs('#streamTransferAsk');
+    if (box) box.hidden = true;
+    resolve(answer || null);
+  };
+  const askTransfer = ({ direction, mime, size, width, height, canScale }) => {
+    answerTransfer(null);
+    const box = qs('#streamTransferAsk');
+    if (!box) return Promise.resolve('accept');
+    const receiving = direction === 'receive';
+    const kind = mime === 'text/plain' ? 'Text' : 'Image';
+    qs('.stream-transfer-label', box).textContent = t(`clipboard.ask.${receiving ? 'receive' : 'send'}${kind}`);
+    qs('.stream-transfer-value', box).textContent = formatBytes(size);
+    const limit = formatBytes(clipboardConfirmBytes());
+    qs('.stream-transfer-detail', box).textContent = [width && height ? `${width} × ${height}` : '', t('clipboard.ask.detail', { limit })].filter(Boolean).join(' · ');
+    qs('.stream-transfer-decline', box).textContent = t(receiving ? 'clipboard.ask.ignore' : 'clipboard.ask.cancel');
+    const scale = qs('.stream-transfer-scale', box);
+    scale.hidden = !canScale;
+    scale.textContent = t('clipboard.ask.scale');
+    qs('.stream-transfer-accept', box).textContent = t(receiving ? 'clipboard.ask.receive' : 'clipboard.ask.send');
+    box.hidden = false;
+    // The buttons need the pointer: give it back from the stream's pointer lock.
+    if (document.pointerLockElement) document.exitPointerLock?.();
+    return new Promise((resolve) => { transferAsk = resolve; });
   };
 
   const errorMessage = (error) => {
@@ -348,6 +396,7 @@
     const settingText = [
       ['[data-toggle="match-display"]', 'settings.matchDisplay', 'settings.matchDisplayHint'],
       ['[data-toggle="capture-pointer"]', 'settings.capturePointer', 'settings.capturePointerHint'],
+      ['[data-toggle="block-local-ime"]', 'settings.blockLocalIme', 'settings.blockLocalImeHint'],
       ['[data-toggle="local-cursor"]', 'settings.localCursor', 'settings.localCursorHint'],
       ['[data-toggle="show-telemetry"]', 'settings.telemetry', 'settings.telemetryHint'],
       ['[data-toggle="ask-launch"]', 'settings.askLaunch', 'settings.askLaunchHint'],
@@ -355,9 +404,9 @@
       ['[data-toggle="clipboard-sync"]', 'settings.clipboardSync', 'settings.clipboardSyncHint'],
     ];
     settingText.forEach(([selector, titleKey, hintKey]) => { const toggle = qs(selector); if (!toggle) return; const row = toggle.closest('.setting-row'); setText('strong', t(titleKey), row); setText('small', t(hintKey), row); });
-    const rowCopy = [['#controlModeRow', 'settings.controlMode', 'settings.controlModeHint'], ['#bitrateModeRow', 'settings.bitrateMode', 'settings.bitrateModeHint']];
+    const rowCopy = [['#controlModeRow', 'settings.controlMode', 'settings.controlModeHint'], ['#bitrateModeRow', 'settings.bitrateMode', 'settings.bitrateModeHint'], ['#clipboardConfirmRow', 'settings.clipboardConfirm', 'settings.clipboardConfirmHint']];
     rowCopy.forEach(([selector, titleKey, hintKey]) => { const row = qs(selector); if (!row) return; setText('strong', t(titleKey), row); setText('small', t(hintKey), row); });
-    const optionCopy = { '#resolutionSelect option[value="auto"]': 'settings.adaptiveWindow', '#controlModeSelect option[value="auto"]': 'control.auto', '#controlModeSelect option[value="desktop"]': 'control.desktop', '#controlModeSelect option[value="game"]': 'control.game', '#bitrateModeSelect option[value="auto"]': 'bitrate.auto', '#codecSelect option[value="auto"]': 'codec.auto', '#bitrateModeSelect option[value="fixed"]': 'bitrate.fixed' };
+    const optionCopy = { '#resolutionSelect option[value="auto"]': 'settings.adaptiveWindow', '#controlModeSelect option[value="auto"]': 'control.auto', '#controlModeSelect option[value="desktop"]': 'control.desktop', '#controlModeSelect option[value="game"]': 'control.game', '#bitrateModeSelect option[value="auto"]': 'bitrate.auto', '#codecSelect option[value="auto"]': 'codec.auto', '#bitrateModeSelect option[value="fixed"]': 'bitrate.fixed', '#clipboardConfirmSelect option[value="never"]': 'settings.clipboardConfirmNever' };
     Object.entries(optionCopy).forEach(([selector, key]) => setText(selector, t(key)));
     setText('.settings-footnote p', t('settings.footnote'));
     const drawer = qs('#settingsDrawer');
@@ -656,6 +705,7 @@
     const controlMode = qs('#controlModeSelect'); if (controlMode) controlMode.value = state.settings.controlMode;
     const bitrateMode = qs('#bitrateModeSelect'); if (bitrateMode) bitrateMode.value = state.settings.bitrateMode;
     const codec = qs('#codecSelect'); if (codec) codec.value = state.settings.codec;
+    const clipboardConfirm = qs('#clipboardConfirmSelect'); if (clipboardConfirm) clipboardConfirm.value = state.settings.clipboardConfirm;
   };
 
   const renderStream = (phase = 'idle') => {
@@ -1462,6 +1512,7 @@
     stopStatsLoop();
     try { state.clipboardSync?.stop(); } catch { /* already stopped */ }
     state.clipboardSync = null;
+    answerTransfer(null);
     clearTimeout(clipboardProgressTimer);
     if (qs('#streamTransfer')) qs('#streamTransfer').hidden = true;
     state.mediaGatewayGeneration += 1;
@@ -1746,7 +1797,7 @@
     });
     state.clipboardSync = window.SunbridgeClipboard?.createClipboardSync({
       isEnabled: () => localStorage.getItem('sunbridge.setting.clipboard-sync') !== 'false',
-      onNotice: (kind, content, error, file) => {
+      onNotice: (kind, content, error, file, limits) => {
         if (generation !== state.mediaGatewayGeneration) return;
         if (kind === 'received') showToast(t('clipboard.received'), content.mime === 'text/plain' ? t('clipboard.receivedText', { count: content.data.length }) : t('clipboard.receivedImage'), 'success');
         else if (kind === 'sent') showToast(t('clipboard.sent'), content.mime === 'text/plain' ? t('clipboard.receivedText', { count: content.data.length }) : t('clipboard.receivedImage'), 'success');
@@ -1755,9 +1806,12 @@
         else if (kind === 'send-failed') showToast(t('clipboard.title'), errorMessage(error), 'warning');
         else if (kind === 'dropped') showToast(t('clipboard.sent'), t('clipboard.dropped'), 'success');
         else if (kind === 'file-unsupported') showToast(t('clipboard.title'), t('clipboard.fileUnsupported', { name: file?.name || '' }), 'warning');
+        else if (kind === 'too-large') showToast(t('clipboard.title'), t('clipboard.tooLarge', { size: formatBytes(limits.size), max: formatBytes(limits.max) }), 'warning');
       },
       onState: () => { if (generation === state.mediaGatewayGeneration) queueStreamRender(); },
       onProgress: (progress) => { if (generation === state.mediaGatewayGeneration) renderClipboardProgress(progress); },
+      onConfirm: (request) => (generation === state.mediaGatewayGeneration ? askTransfer(request) : Promise.resolve(null)),
+      getConfirmBytes: clipboardConfirmBytes,
     }) || null;
     if (useWorker) {
       state.videoPipeline = state.mediaGateway?.videoPipeline || null;
@@ -1788,6 +1842,8 @@
         getMode: () => state.controlMode || 'game',
         getTouchMode: touchMode,
         textInput: qs('#streamKeyboardInput'),
+        keySink: qs('#streamKeySink'),
+        blockLocalIme: () => localStorage.getItem('sunbridge.setting.block-local-ime') !== 'false',
         beforePaste: () => state.clipboardSync?.beforePaste() ?? null,
       });
     }
@@ -2568,6 +2624,7 @@
     if (action === 'toggle-follow-window') toggleFollowWindow();
     if (action === 'show-keyboard') showSoftKeyboard();
     if (action === 'send-clipboard') void state.clipboardSync?.sendNow();
+    if (action === 'cancel-transfer') state.clipboardSync?.cancel(qs('#streamTransfer')?.dataset.direction);
     if (action === 'resume-session' && state.activeRemoteSession) void resumeStream(state.activeRemoteSession);
     if (action === 'end-active-session') void (async () => { try { await bridge.stop(); } catch (error) { showToast(t('session.stopFailed'), errorMessage(error), 'warning'); } state.activeRemoteSession = null; renderResumeBar(); })();
     if (action === 'host-unpair') void handleHostUnpair(actionTarget);
@@ -2588,6 +2645,7 @@
   document.addEventListener('submit', (event) => { if (event.target.matches('#pairForm')) handlePairSubmit(event); if (event.target.matches('#hostForm')) void handleHostSave(event); });
   document.addEventListener('mousedown', (event) => { if (event.target.matches('#hostModal')) closeHostModal(); });
   document.addEventListener('click', (event) => { const toggle = event.target.closest('[data-toggle]'); if (toggle) toggleSetting(toggle); });
+  document.addEventListener('click', (event) => { const answer = event.target.closest('[data-transfer-answer]'); if (answer) answerTransfer(answer.dataset.transferAnswer); });
   // Show the saved state of each switch (the markup only has the defaults).
   qsa('[data-toggle]').forEach((toggle) => {
     let saved = null;
@@ -2610,6 +2668,7 @@
     if (target.matches('#controlModeSelect')) { state.settings.controlMode = target.value; saveSettings(); }
     if (target.matches('#bitrateModeSelect')) { state.settings.bitrateMode = target.value; saveSettings(); }
     if (target.matches('#codecSelect')) { state.settings.codec = target.value; saveSettings(); }
+    if (target.matches('#clipboardConfirmSelect')) { state.settings.clipboardConfirm = target.value; saveSettings(); }
     if (target.matches('#hostForm select')) updateBitratePlaceholder();
     if (target.matches('#fpsSelect')) { const fps = Number.parseInt(target.value, 10); if (Number.isFinite(fps)) { state.settings.fps = fps; saveSettings(); renderAll(); } }
   });

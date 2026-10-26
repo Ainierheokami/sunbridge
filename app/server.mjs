@@ -950,6 +950,13 @@ function requestHost(host, endpoint, params = {}, options = {}) {
       });
     });
     request.on('timeout', () => request.destroy(bridgeError(`连接 Sunshine 超时（${host.address}:${port}）`, 'SUNSHINE_UNAVAILABLE')));
+    // options.signal: abort the request (a clipboard transfer the browser cancelled).
+    if (options.signal) {
+      const abort = () => request.destroy(bridgeError('已取消', 'CLIPBOARD_CANCELLED'));
+      if (options.signal.aborted) abort();
+      else options.signal.addEventListener('abort', abort, { once: true });
+      request.on('close', () => options.signal.removeEventListener('abort', abort));
+    }
     request.on('error', (error) => {
       const pairStep = ['phrase', 'clientchallenge', 'serverchallengeresp', 'clientpairingsecret'].find((key) => key in params);
       if (endpoint === '/pair' && pairStep && error instanceof Error) error.message = `${error.message} [pair ${pairStep === 'phrase' ? params.phrase : pairStep}, ${secure ? 'https' : 'http'}]`;
@@ -3256,7 +3263,10 @@ async function launchHost(input) {
 // ---------------------------------------------------------------------------
 // Clipboard sync (clipboard.mjs). Host -> browser: text up to CLIPBOARD_INLINE_TEXT goes in the gateway
 // message, anything else (images, large text, blobs fetched from the host) waits in a short-lived store for
-// the browser to GET it. Browser -> host: POSTed raw, sent inline or uploaded to the host as a blob.
+// the browser to GET it; a host blob is only downloaded from the host on that GET, so content the user declines
+// (the browser asks first when it is large) never crosses the network. Browser -> host: POSTed raw, sent inline
+// or uploaded to the host as a blob; a browser that cancels (closes the upload) stops it before the host
+// clipboard changes.
 // ---------------------------------------------------------------------------
 const CONTROL_CLIPBOARD = 0x5508;
 const CLIPBOARD_INLINE_TEXT = 256 * 1024;
@@ -3277,14 +3287,20 @@ async function receiveHostClipboard(session, frame) {
     if (!ref || ref.size > Clipboard.BLOB_MAX_BYTES) return;
     mime = Clipboard.isTextMime(ref.mime) ? 'text/plain' : ref.mime.toLowerCase() === 'image/png' ? 'image/png' : null;
     if (!mime) return;
-    try {
-      const result = await requestHost(hosts[session.hostId], `/api/v1/clipboard/blob/${ref.id}`, {}, { secure: true, binary: true, timeout: 30000 });
-      data = result.body;
-    } catch (error) {
-      LOG.warn('stream', 'clipboard', `下载主机剪贴板内容失败：${safeError(error)}`);
-      return;
-    }
-    if (data.length > Clipboard.BLOB_MAX_BYTES || (ref.size > 0 && data.length !== ref.size)) return;
+    const host = hosts[session.hostId];
+    const load = async () => {
+      let body;
+      try {
+        body = (await requestHost(host, `/api/v1/clipboard/blob/${ref.id}`, {}, { secure: true, binary: true, timeout: 30000 })).body;
+      } catch (error) {
+        LOG.warn('stream', 'clipboard', `下载主机剪贴板内容失败：${safeError(error)}`);
+        throw error;
+      }
+      if (body.length > Clipboard.BLOB_MAX_BYTES || (ref.size > 0 && body.length !== ref.size)) throw bridgeError('主机剪贴板内容大小不符', 'CLIPBOARD_UPLOAD_FAILED', { statusCode: 502 });
+      return body;
+    };
+    broadcastGatewayJson(session, { type: 'clipboard', mime, id: clipboardStore.put(load, mime), size: ref.size });
+    return;
   } else {
     return;
   }
@@ -3296,7 +3312,8 @@ async function receiveHostClipboard(session, frame) {
   }
 }
 
-async function sendClipboardToHost(session, mime, data) {
+// signal: aborted when the browser cancels; the host clipboard is then left as it was.
+async function sendClipboardToHost(session, mime, data, signal) {
   const control = activeControl(session);
   if (!control) throw bridgeError('串流还没有连上主机', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
   const kind = Clipboard.isTextMime(mime) ? Clipboard.KIND.TEXT : mime === 'image/png' ? Clipboard.KIND.PNG : 0;
@@ -3311,13 +3328,14 @@ async function sendClipboardToHost(session, mime, data) {
   if (data.length > Clipboard.INLINE_MAX_BYTES) {
     // Too large for one control message: upload to the host, send a reference.
     const wireMime = kind === Clipboard.KIND.TEXT ? 'text/plain;charset=utf-8' : 'image/png';
-    const result = await requestHost(hosts[session.hostId], '/api/v1/clipboard/blob', {}, { secure: true, method: 'POST', body: data, headers: { 'X-Clipboard-Mime': wireMime }, timeout: 60000 });
+    const result = await requestHost(hosts[session.hostId], '/api/v1/clipboard/blob', {}, { secure: true, method: 'POST', body: data, headers: { 'X-Clipboard-Mime': wireMime }, timeout: 60000, signal });
     let uploaded;
     try { uploaded = JSON.parse(result.body); } catch { uploaded = null; }
     if (!uploaded?.id) throw bridgeError('主机没有接受剪贴板内容', 'CLIPBOARD_UPLOAD_FAILED', { statusCode: 502 });
     frameKind = Clipboard.KIND.REF;
     payload = Buffer.from(JSON.stringify({ type: 'ref', id: String(uploaded.id), mime: uploaded.mime || wireMime, size: Number(uploaded.size) || data.length }));
   }
+  if (signal?.aborted) throw bridgeError('已取消', 'CLIPBOARD_CANCELLED', { statusCode: 499 });
   const { frame, token } = Clipboard.encodeFrame(frameKind, payload);
   clipboardEcho.sent(token);
   if (control.sendMessage(CONTROL_CLIPBOARD, frame) === false) throw bridgeError('发送到主机失败', 'CLIPBOARD_UNAVAILABLE', { statusCode: 503 });
@@ -3879,15 +3897,37 @@ async function handleApi(request, response, pathname) {
   if (pathname === '/api/bridge/clipboard' && request.method === 'POST') {
     if (!activeSession) throw bridgeError('没有正在进行的串流', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
     const mime = String(request.headers['x-clipboard-mime'] || '').toLowerCase().split(';')[0].trim();
-    const data = await readRawBody(request, Clipboard.BLOB_MAX_BYTES);
-    jsonResponse(response, 200, { ok: true, ...(await sendClipboardToHost(activeSession, mime === 'text/plain' ? 'text/plain;charset=utf-8' : mime, data)) });
+    // Too large is refused from the header, before any of it is read.
+    if (Number(request.headers['content-length']) > Clipboard.BLOB_MAX_BYTES) throw bridgeError('剪贴板内容太大', 'CLIPBOARD_TOO_LARGE', { statusCode: 413 });
+    // The browser closing the request (its cancel button) aborts the rest of the transfer.
+    const cancel = new AbortController();
+    const onClose = () => { if (!response.writableEnded) cancel.abort(); };
+    response.on('close', onClose);
+    try {
+      const data = await readRawBody(request, Clipboard.BLOB_MAX_BYTES);
+      jsonResponse(response, 200, { ok: true, ...(await sendClipboardToHost(activeSession, mime === 'text/plain' ? 'text/plain;charset=utf-8' : mime, data, cancel.signal)) });
+    } catch (error) {
+      if (!cancel.signal.aborted) throw error;
+      LOG.info('stream', 'clipboard', '浏览器取消了剪贴板发送');
+      response.destroy();
+    } finally {
+      response.off('close', onClose);
+    }
     return;
   }
   if (pathname.startsWith('/api/bridge/clipboard/') && request.method === 'GET') {
     const item = clipboardStore.get(pathname.slice('/api/bridge/clipboard/'.length));
     if (!item) { jsonResponse(response, 404, { ok: false, errorCode: 'CLIPBOARD_EXPIRED', error: '剪贴板内容已过期' }); return; }
-    response.writeHead(200, { 'Content-Type': item.mime === 'text/plain' ? 'text/plain; charset=utf-8' : item.mime, 'Content-Length': item.data.length, 'Cache-Control': 'no-store' });
-    response.end(item.data);
+    let data;
+    try {
+      data = await item.data();
+    } catch (error) {
+      jsonResponse(response, 502, { ok: false, errorCode: 'CLIPBOARD_UPLOAD_FAILED', error: `从主机获取剪贴板内容失败：${safeError(error)}` });
+      return;
+    }
+    if (response.destroyed) return;
+    response.writeHead(200, { 'Content-Type': item.mime === 'text/plain' ? 'text/plain; charset=utf-8' : item.mime, 'Content-Length': data.length, 'Cache-Control': 'no-store' });
+    response.end(data);
     return;
   }
   // Throughput between this browser and the bridge (the interaction test): download a stream of bytes, or

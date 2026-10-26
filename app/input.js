@@ -79,16 +79,20 @@
 
   // Keyboard input goes two ways:
   //   - raw keys (the default): physical keys as virtual-key codes, and the host's own input method composes
-  //     text. Focus sits on the canvas, which is not editable, so this device's input method stays out of it
-  //     (an editable element left focused - a form field behind the stream, the soft keyboard's textarea -
-  //     would have both input methods compose the same keys);
+  //     text. This device's input method must stay out of it, or both compose the same keys. A non-editable
+  //     canvas isn't enough: Chrome and Edge keep a CJK input method on for it (keys arrive as 229 / "Process"
+  //     and its candidate window shows). So with a mouse, focus sits on keySink, a hidden password field:
+  //     browsers turn input methods off in password fields (macOS switches to a Roman layout). Touch-only
+  //     devices keep the canvas, where a focused field would bring up the on-screen keyboard;
   //   - text (the soft keyboard's textarea is focused): this device's input method composes and the committed
   //     text is sent as Unicode; only keys that don't type (Enter, arrows, shortcuts) go as raw keys.
   // beforePaste(): called on Ctrl/Cmd+V; while the promise it returns is pending, the keystroke is held back so
-  // the host pastes this device's clipboard (clipboard sync) rather than its own old content.
+  // the host pastes this device's clipboard (clipboard sync) rather than its own old content. Resolving false
+  // drops it (large content waiting for the user's go-ahead).
   // getTouchMode(): how touches drive the host's mouse in desktop mode - 'direct' (the cursor goes where the
   // finger is) or 'trackpad' (the screen is a laptop trackpad: drag moves the cursor, tap clicks).
-  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', getTouchMode = () => 'direct', textInput = null, beforePaste = null } = {}) {
+  // blockLocalIme(): whether raw keys go through keySink (a setting; off = focus on the canvas as before).
+  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', getTouchMode = () => 'direct', textInput = null, keySink = null, blockLocalIme = () => true, beforePaste = null } = {}) {
     if (!canvas || typeof send !== 'function') throw new TypeError('createInputController needs a canvas and a send function');
     const pressedKeys = new Map(); // code -> vk
     const pressedButtons = new Set();
@@ -148,27 +152,41 @@
       queueMicrotask(flush);
     };
 
+    // A promise resolving false drops the held V presses (the paste waits for the user: see beforePaste);
+    // every other key held meanwhile, Ctrl's release included, still goes out.
     const holdUntil = (promise, timeoutMs = 3000) => {
       held = held || [];
       let timer = null;
-      const release = () => {
+      const release = (value) => {
         clearTimeout(timer);
         if (!held) return;
-        const events = held;
+        let events = held;
         held = null;
+        if (value === false) events = events.filter((event) => !(event.kind === 'key' && event.keyCode === VK.KeyV));
         events.forEach(push);
       };
       timer = setTimeout(release, timeoutMs);
       Promise.resolve(promise).catch(() => {}).then(release);
     };
 
-    // Take focus off editable elements (see the note above createInputController).
-    const focusCanvas = () => {
-      if (document.activeElement === canvas) return;
-      if (canvas.tabIndex < 0 && !canvas.hasAttribute('tabindex')) canvas.tabIndex = -1;
-      try { canvas.focus({ preventScroll: true }); } catch { /* not focusable */ }
+    // Where raw keys go (see the note above createInputController): keySink with a mouse, else the canvas.
+    const sinkUsable = () => Boolean(keySink && blockLocalIme() && window.matchMedia?.('(any-pointer: fine)').matches);
+    const focusKeys = () => {
+      const target = sinkUsable() ? keySink : canvas;
+      if (document.activeElement === target) return;
+      if (target === canvas && canvas.tabIndex < 0 && !canvas.hasAttribute('tabindex')) canvas.tabIndex = -1;
+      try { target.focus({ preventScroll: true }); } catch { /* not focusable */ }
     };
-    if (isEditable(document.activeElement) && document.activeElement !== textInput) focusCanvas();
+    if (document.activeElement !== textInput && (sinkUsable() || isEditable(document.activeElement))) focusKeys();
+    if (keySink) {
+      // Raw keys are prevented from typing; whatever still lands (a paste clipboard sync didn't take) is dropped.
+      on(keySink, 'input', () => { keySink.value = ''; });
+      // A click on a toolbar button takes focus with it: hand it back so the next key isn't composed here.
+      on(document, 'focusin', (event) => {
+        if (!active() || !sinkUsable() || event.target === keySink || event.target === textInput || isEditable(event.target)) return;
+        setTimeout(() => { if (active() && document.activeElement === event.target) focusKeys(); }, 0);
+      });
+    }
 
     const releaseAll = () => {
       held = null; // what it held is released below as key / button ups
@@ -204,8 +222,8 @@
         if (event.isComposing || event.keyCode === 229 || event.key === 'Process') return;
         const typesText = event.key.length === 1 && ((!event.ctrlKey && !event.metaKey && !event.altKey) || event.getModifierState?.('AltGraph'));
         if (typesText) return;
-      } else if (isEditable(event.target)) {
-        focusCanvas();
+      } else if (event.target === keySink ? !sinkUsable() : isEditable(event.target) || sinkUsable()) {
+        focusKeys();
       }
       // Ctrl/Cmd+V: let the browser's paste event through (it carries this device's clipboard) and hold the
       // keystroke until clipboard sync has put that content on the host.
@@ -254,7 +272,7 @@
       if (event.pointerType === 'touch' && desktopMode()) return; // handled by the touch gestures below
       event.preventDefault();
       // A mouse click puts the keyboard back on raw keys (and closes any input method on this device).
-      if (event.pointerType !== 'touch') focusCanvas();
+      if (event.pointerType !== 'touch') focusKeys();
       if (!pointerLocked() && !desktopMode() && shouldCapturePointer()) requestCapture();
       if (!pointerLocked()) {
         const point = videoPoint(canvas, event.clientX, event.clientY);
@@ -604,6 +622,7 @@
         if (gamepadFrame) cancelAnimationFrame(gamepadFrame);
         gamepadFrame = null;
         if (pointerLocked()) document.exitPointerLock?.();
+        if (keySink && document.activeElement === keySink) keySink.blur();
         // A controller also stops when the stream reconnects (resize, codec switch): the fullscreen's lock stays.
         if (!document.fullscreenElement) navigator.keyboard?.unlock?.();
         listeners.splice(0).forEach((off) => off());
