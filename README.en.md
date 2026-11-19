@@ -50,7 +50,7 @@ Sunbridge runs on your own computer (usually the one running Sunshine) and turns
 - **Diagnosis**: the Network page checks every leg: host ports, Sunshine status and pairing, RTSP, the bridge's entrypoints and WebRTC, a real WebRTC connection from the browser, and while streaming the UDP video / audio / control traffic.
 - **Game mode**: pointer lock with relative motion, gamepads with rumble.
 - **Glitch-free audio**: Opus stereo played through a jitter buffer with clock-drift correction.
-- **Set up in the browser**: create the account in the web page on first start; access, certificates and two-step verification are all web settings, and `start.bat` / `start.sh` only start the bridge and get you back in. Installed with git, it checks for updates and updates and restarts itself from the Preferences page.
+- **Set up in the browser**: create the account in the web page on first start; access, certificates and two-step verification are all web settings. Use `start.bat` / `start.sh` for startup, autostart, and recovery. Installed with git, it checks for updates and updates and restarts itself from the Preferences page.
 - **Multiple entrypoints**: several ports at once, each with its own HTTPS and reverse-proxy setting (e.g. one for nginx on this machine, one reached through a router port forward). Certificates are picked by domain, and the allowed domains can be restricted.
 - **Logs**: sign-ins, refused connections (address not allowed, untrusted proxy, cross-site requests), settings changes and streams, filterable on the Logs page.
 - **Secure by default**: every page and API needs a login, optional two-step verification (authenticator app codes, separately for login, starting a stream and resuming a session), failed logins are rate-limited, cross-site requests are blocked, and pairing keys and account data are never served over the web.
@@ -87,13 +87,26 @@ cd sunbridge
 3. Choose “Add host” and pair with the PIN shown in Sunshine's web UI.
 4. For domains, a reverse proxy or a router port forward, add entrypoints, certificates and allowed domains under **Access**. A change must be confirmed from the new address within 60 seconds or it is undone, so you cannot lock yourself out.
 
-The script keeps a few commands: `start`, `status` (addresses, setup code, recent warnings), `reset-network` (back to the default network settings when the page is unreachable), `passwd`, `logout-all`, `2fa-off`.
+Run `./start.sh help` (`start.bat help` on Windows) to see all management commands.
 
 > Browsers only enable video decoding, gamepads and pointer lock on HTTPS or localhost, so use HTTPS when connecting from other devices.
 
 Shortcuts: Ctrl+Alt+Shift+Z releases the mouse, Ctrl+Alt+Shift+Q ends the stream, Ctrl+Alt+Shift+S toggles the stream statistics.
 
 **Settings → Appearance and text** switches between light, dark and system themes and enlarges the text (Large / Extra large); it applies to the current browser only.
+
+### Autostart
+
+Choose the install or uninstall autostart option in the script menu, or run:
+
+| Platform | Enable | Disable |
+| --- | --- | --- |
+| Windows | `start.bat autostart-install` | `start.bat autostart-uninstall` |
+| Linux | `./start.sh autostart-install` | `./start.sh autostart-uninstall` |
+
+- **Windows**: Double-click `start.bat`, choose install or uninstall in the menu, and approve the Windows permission prompt. You do not need to open an elevated terminal first. During installation, enter the Windows password (not the PIN) for the account running Sunbridge in the new window. Task Scheduler stores the credentials and starts Sunbridge at boot without a sign-in. Keep Sunbridge and Node.js on a local drive accessible at boot. Choose install again to replace an older autostart task or update the credentials after a password change.
+- **Linux**: Run the script as the desired user without `sudo` to install a systemd user service. It starts at login by default. For unattended startup at boot, run `loginctl enable-linger "$USER"`.
+- Installing or uninstalling autostart does not start or stop Sunbridge immediately or delete its data. Autostart uses saved settings, not temporary shell environment variables from installation. Reinstall autostart after moving Sunbridge or changing the Node.js executable path.
 
 ### Two-step verification
 

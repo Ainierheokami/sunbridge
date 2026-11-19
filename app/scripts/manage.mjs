@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { disableTwoFactor, loadAuthState, normalizePolicy, saveAuthState, setupCodeFile } from '../auth.mjs';
 import { defaultConfig, environmentEntrypoint, loadConfig, saveConfig } from '../netconfig.mjs';
 import { nodeRuntimeStatus, PATCHED_VERSIONS } from '../runtime.mjs';
+import { configureAutostart } from './autostart.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = process.env.SUNBRIDGE_DATA_DIR ? path.resolve(process.env.SUNBRIDGE_DATA_DIR) : path.join(ROOT, '..', 'data');
@@ -247,13 +248,26 @@ function installDependencies() {
   return ensureDependencies({ quiet: false }) ? 0 : 1;
 }
 
+function setAutostart(enable) {
+  try {
+    if (IS_WINDOWS) console.log(dim('如有 Windows 权限提示，请确认后继续。'));
+    const method = configureAutostart(enable);
+    console.log(green(`已${enable ? '开启' : '关闭'} Sunbridge 自启（${method}）。`));
+    if (enable && process.platform === 'linux') console.log(dim('默认在用户登录时启动；如需开机后未登录也启动，请运行 loginctl enable-linger "$USER"。'));
+    return 0;
+  } catch (error) {
+    console.error(red(`自启设置失败：${error.message}`));
+    return 1;
+  }
+}
+
 async function start() {
   if (await isRunning()) {
     console.log(red('Sunbridge 已经在运行（入口端口已被占用）。'));
     return 1;
   }
   ensureDependencies();
-  console.log(dim('按 Ctrl+C 停止 Sunbridge 并返回菜单。\n'));
+  if (process.stdout.isTTY) console.log(dim('按 Ctrl+C 停止 Sunbridge 并返回菜单。\n'));
   // The bridge exits with this code when restarted from the web page: start it again.
   const RESTART_EXIT_CODE = 75;
   let code;
@@ -306,11 +320,13 @@ const COMMANDS = {
   passwd: { label: '重置登录密码', run: setPassword },
   'logout-all': { label: '注销所有已登录设备', run: logoutAll },
   '2fa-off': { label: '关闭两步验证（验证器和恢复码都丢失时）', run: twoFactorOff },
+  'autostart-install': { label: '安装并开启自启（Windows / Linux）', run: () => setAutostart(true) },
+  'autostart-uninstall': { label: '卸载并关闭自启（Windows / Linux）', run: () => setAutostart(false) },
 };
 
 function help() {
   console.log(`用法：${SCRIPT} [命令]\n`);
-  for (const [name, command] of Object.entries(COMMANDS)) console.log(`  ${name.padEnd(14)} ${command.label}`);
+  for (const [name, command] of Object.entries(COMMANDS)) console.log(`  ${name.padEnd(20)} ${command.label}`);
   console.log(`\n不带命令时进入交互菜单。访问方式、证书、两步验证和日志都在网页里设置。`);
 }
 
