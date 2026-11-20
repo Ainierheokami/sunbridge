@@ -6,8 +6,9 @@
 //   - Ctrl/Cmd+V on the stream (beforePaste + the page's paste event): the paste event carries the clipboard
 //     without a permission prompt, image files copied in a file manager included, and the keystroke is held
 //     until the host has it; files and images dropped on the stream go the same way (sendDataTransfer).
-//     The host side only takes text and images (Foundation Sunshine's protocol has no file kind), so other
-//     files are refused with a notice; images in other formats are converted to PNG;
+//     A single image goes to the host clipboard as a picture (other formats converted to PNG); other files,
+//     several files and folders go to onFiles (files.js: the host can paste them as files), or are refused
+//     with a notice when there is none;
 //   - host -> this device: written to the local clipboard; when the browser refuses (page not focused, no
 //     user gesture yet) it is kept and written on the next focus or click.
 // A fingerprint of the last content sent or received stops it bouncing back and forth.
@@ -107,7 +108,7 @@
 
   // onConfirm({ direction: 'send' | 'receive', mime, size, width, height, canScale }) asks the user about large
   // content: resolves 'accept', 'scale' (send the image scaled down) or null (don't).
-  function createClipboardSync({ isEnabled = () => true, onNotice = () => {}, onState = () => {}, onProgress = () => {}, onConfirm = async () => 'accept', getConfirmBytes = () => DEFAULT_CONFIRM_BYTES } = {}) {
+  function createClipboardSync({ isEnabled = () => true, onNotice = () => {}, onState = () => {}, onProgress = () => {}, onConfirm = async () => 'accept', getConfirmBytes = () => DEFAULT_CONFIRM_BYTES, onFiles = null } = {}) {
     let capability = { text: false, image: false };
     let lastFingerprint = null;
     let localFingerprint = null; // what this device's clipboard is known to hold (last sent from or written to it)
@@ -235,7 +236,13 @@
       if (!files.length) {
         for (const item of Array.from(transfer.items || [])) if (item.kind === 'file') { const file = item.getAsFile(); if (file) files.push(file); }
       }
-      return { files, text: transfer.getData?.('text/plain') || '' };
+      // Folders only show up as entries (a drop in most browsers), and only while the event lasts.
+      const entries = [];
+      for (const item of Array.from(transfer.items || [])) {
+        const entry = item.kind === 'file' ? item.webkitGetAsEntry?.() : null;
+        if (entry) entries.push(entry);
+      }
+      return { files, entries, folders: entries.some((entry) => entry.isDirectory), text: transfer.getData?.('text/plain') || '' };
     }
 
     async function contentOf(snap, manual, current) {
@@ -261,6 +268,17 @@
 
     async function sendSnapshot(snap, manual, onAsk) {
       if (!active() || !snap) return false;
+      // Files the host can paste as files: anything but a single picture.
+      const picture = snap.files.length === 1 && !snap.folders && snap.files[0].type.startsWith('image/') && capability.image;
+      if (onFiles && (snap.files.length || snap.folders) && !picture) {
+        busy = true;
+        try {
+          return await onFiles(snap);
+        } finally {
+          busy = false;
+          onState(state());
+        }
+      }
       busy = true;
       const current = beginTransfer('send');
       try {

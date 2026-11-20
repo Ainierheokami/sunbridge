@@ -15,6 +15,9 @@ import { createAuth } from './auth.mjs';
 import { createLog, LOG_CATEGORIES } from './log.mjs';
 import { rtcSupport, answerOffer, fragmentFrame } from './webrtc.mjs';
 import * as Clipboard from './clipboard.mjs';
+import * as Files from './files.mjs';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
 import { createUpdater } from './update.mjs';
 import { nodeRuntimeStatus } from './runtime.mjs';
 import {
@@ -3278,6 +3281,8 @@ async function receiveHostClipboard(session, frame) {
   if (activeSession !== session) return;
   const message = Clipboard.decodeFrame(frame);
   if (!message || clipboardEcho.isEcho(message.token)) return;
+  if (message.kind === Files.KIND_FILE_OFFER) { handleHostFileOffer(session, message.payload); return; }
+  if (message.kind === Files.KIND_FILE_PULL) { handleHostFilePull(session, message.payload); return; }
   let mime;
   let data = message.payload;
   if (message.kind === Clipboard.KIND.TEXT) mime = 'text/plain';
@@ -3285,6 +3290,16 @@ async function receiveHostClipboard(session, frame) {
   else if (message.kind === Clipboard.KIND.REF) {
     const ref = Clipboard.parseRef(message.payload);
     if (!ref || ref.size > Clipboard.BLOB_MAX_BYTES) return;
+    if (ref.mime.toLowerCase() === Files.OFFER_MIME) {
+      // A long file list: fetch it now (the browser shows it right away).
+      try {
+        const body = (await requestHost(hosts[session.hostId], `/api/v1/clipboard/blob/${ref.id}`, {}, { secure: true, binary: true, timeout: 30000 })).body;
+        if (activeSession === session) handleHostFileOffer(session, body);
+      } catch (error) {
+        LOG.warn('stream', 'clipboard', `下载主机的文件列表失败：${safeError(error)}`);
+      }
+      return;
+    }
     mime = Clipboard.isTextMime(ref.mime) ? 'text/plain' : ref.mime.toLowerCase() === 'image/png' ? 'image/png' : null;
     if (!mime) return;
     const host = hosts[session.hostId];
@@ -3344,6 +3359,147 @@ async function sendClipboardToHost(session, mime, data, signal) {
   // the clipboard asynchronously - and paste the host's old content.
   const applied = await clipboardEcho.applied(token, CLIPBOARD_APPLY_WAIT_MS);
   return { kind: frameKind === Clipboard.KIND.REF ? 'blob' : 'inline', bytes: data.length, applied };
+}
+
+// ---------------------------------------------------------------------------
+// Files copied through clipboard sync (files.mjs). Host -> browser: the list goes to the browsers, which
+// download a file (or a zip of all of them) through the bridge; the bridge streams it from the host as it goes.
+// Browser -> host: the browser posts the list and keeps the files; when the host pastes, each chunk the host
+// asks for (kind 5) goes to the browsers, the one holding the files posts it back, and the bridge hands it on.
+// ---------------------------------------------------------------------------
+const hostFileOffers = Files.createOfferStore(); // id -> { hostId, offer }
+const localFileOffers = Files.createOfferStore(); // id -> { hostId, count }
+const pendingFilePulls = new Map(); // ticket -> { session, pull, at }
+const FILE_PULL_TTL_MS = 60 * 1000;
+const FILE_OFFER_MAX_BODY = 4 * 1024 * 1024;
+
+function handleHostFileOffer(session, payload) {
+  const offer = Files.parseOffer(payload);
+  if (!offer) { LOG.warn('stream', 'clipboard', '主机发来的文件列表无法识别，已忽略'); return; }
+  hostFileOffers.put(offer.id, { hostId: session.hostId, offer }, offer.expiresInMs);
+  LOG.info('stream', 'clipboard', `主机复制了 ${offer.entries.length} 项文件（${offer.totalSize} 字节）`);
+  broadcastGatewayJson(session, {
+    type: 'files', id: offer.id, kind: offer.type, totalSize: offer.totalSize, zip: Files.zipFits(offer.entries),
+    files: offer.entries.map(({ path: name, size, dir }) => ({ path: name, size, dir })),
+  });
+}
+
+// Answers the host's chunk request: the bytes, or an error word.
+async function answerFilePull(session, pull, data, error) {
+  const host = hosts[session.hostId];
+  if (!host) return;
+  try {
+    await requestHost(host, `/api/v1/file-transfer/chunk/${pull.ticket}`, {}, {
+      secure: true, identityParams: false, method: 'POST', body: data?.length ? data : Buffer.alloc(0),
+      headers: error ? { 'X-File-Transfer-Error': error } : {}, timeout: 60000,
+    });
+  } catch (requestError) {
+    LOG.warn('stream', 'clipboard', `把文件分块交给主机失败：${safeError(requestError)}`);
+  }
+}
+
+function handleHostFilePull(session, payload) {
+  const pull = Files.parsePull(payload);
+  if (!pull) { LOG.warn('stream', 'clipboard', '主机的文件分块请求无法识别，已忽略'); return; }
+  const offer = localFileOffers.get(pull.id);
+  if (!offer || offer.hostId !== session.hostId) { void answerFilePull(session, pull, null, 'not_found'); return; }
+  if (!mediaGatewayClientCount(session)) { void answerFilePull(session, pull, null, 'gone'); return; }
+  const now = Date.now();
+  for (const [ticket, pending] of pendingFilePulls) if (now - pending.at > FILE_PULL_TTL_MS) pendingFilePulls.delete(ticket);
+  pendingFilePulls.set(pull.ticket, { session, pull, at: now });
+  broadcastGatewayJson(session, { type: 'file-pull', ...pull });
+}
+
+// A file list from the browser to the host (inline, or as a blob when it is long).
+async function sendFileOfferToHost(session, payload) {
+  const control = activeControl(session);
+  if (!control) throw bridgeError('串流还没有连上主机', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
+  if (!session.clipboard?.text && !session.clipboard?.image) {
+    throw bridgeError('主机没有开启剪贴板同步（Sunshine 设置里打开，并保持 Sunshine 桌面程序运行）', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
+  }
+  let kind = Files.KIND_FILE_OFFER;
+  let body = payload;
+  if (payload.length > Clipboard.INLINE_MAX_BYTES) {
+    const result = await requestHost(hosts[session.hostId], '/api/v1/clipboard/blob', {}, { secure: true, method: 'POST', body: payload, headers: { 'X-Clipboard-Mime': Files.OFFER_MIME }, timeout: 60000 });
+    let uploaded;
+    try { uploaded = JSON.parse(result.body); } catch { uploaded = null; }
+    if (!uploaded?.id) throw bridgeError('主机没有接受文件列表', 'CLIPBOARD_UPLOAD_FAILED', { statusCode: 502 });
+    kind = Clipboard.KIND.REF;
+    body = Buffer.from(JSON.stringify({ type: 'ref', id: String(uploaded.id), mime: Files.OFFER_MIME, size: payload.length }));
+  }
+  const { frame } = Clipboard.encodeFrame(kind, body);
+  if (control.sendMessage(CONTROL_CLIPBOARD, frame) === false) throw bridgeError('发送到主机失败', 'CLIPBOARD_UNAVAILABLE', { statusCode: 503 });
+}
+
+// The response stream of a GET to the host's paired HTTPS port, once its status and certificate check out.
+function streamFromHost(host, endpoint, signal) {
+  return new Promise((resolve, reject) => {
+    const request = https.request({
+      hostname: host.address, port: host.httpsPort || DEFAULT_HTTPS_PORT, path: endpoint, method: 'GET', agent: false,
+      headers: { 'User-Agent': 'Sunbridge/0.4', Connection: 'close' },
+      cert: identity.certificatePem, key: identity.privateKeyPem, rejectUnauthorized: false, timeout: 60000,
+    }, (response) => {
+      const peer = response.socket?.getPeerCertificate?.(true);
+      if (host.serverCertBase64 && !(peer?.raw && peer.raw.equals(unbase64(host.serverCertBase64)))) {
+        response.destroy();
+        reject(bridgeError('Sunshine TLS 证书与已保存的配对证书不一致', 'TLS_CERTIFICATE_MISMATCH'));
+        return;
+      }
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(bridgeError(`Sunshine 返回 HTTP ${response.statusCode}`, 'SUNSHINE_REQUEST_FAILED', { statusCode: 502 }));
+        return;
+      }
+      resolve(response);
+    });
+    request.on('timeout', () => request.destroy(bridgeError('连接 Sunshine 超时', 'SUNSHINE_UNAVAILABLE')));
+    request.on('error', (error) => reject(setErrorCode(error, 'SUNSHINE_UNAVAILABLE')));
+    if (signal) {
+      const abort = () => request.destroy(bridgeError('已取消', 'CLIPBOARD_CANCELLED'));
+      if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
+      request.on('close', () => signal.removeEventListener('abort', abort));
+    }
+    request.end();
+  });
+}
+
+function attachmentHeader(name) {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
+// GET /api/bridge/files/<id>/<index | zip>: a file of a host offer, or all of it as one zip.
+async function serveHostFile(request, response, id, which) {
+  const stored = hostFileOffers.get(id);
+  const host = stored && hosts[stored.hostId];
+  if (!stored || !host) { jsonResponse(response, 404, { ok: false, errorCode: 'FILES_EXPIRED', error: '主机复制的文件已过期，请在主机上重新复制' }); return; }
+  const { offer } = stored;
+  const cancel = new AbortController();
+  const onClose = () => { if (!response.writableEnded) cancel.abort(); };
+  response.on('close', onClose);
+  try {
+    if (which === 'zip') {
+      if (!Files.zipFits(offer.entries)) { jsonResponse(response, 413, { ok: false, errorCode: 'FILES_TOO_LARGE', error: '文件太大，无法打包成 zip，请逐个下载或保存到文件夹' }); return; }
+      const top = new Set(offer.entries.map((entry) => entry.path.split('/')[0]));
+      const name = top.size === 1 ? `${[...top][0]}.zip` : 'files.zip';
+      response.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': Files.zipSize(offer.entries), 'Content-Disposition': attachmentHeader(name), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      await pipeline(Readable.from(Files.zipEntries(offer.entries, (index) => streamFromHost(host, `/api/v1/file-transfer/${id}/${index}`, cancel.signal))), response);
+      return;
+    }
+    const index = Number(which);
+    const entry = offer.entries[index];
+    if (!entry || entry.dir) { jsonResponse(response, 404, { ok: false, errorCode: 'FILES_EXPIRED', error: '没有这个文件' }); return; }
+    const upstream = await streamFromHost(host, `/api/v1/file-transfer/${id}/${index}`, cancel.signal);
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': entry.size, 'Content-Disposition': attachmentHeader(entry.path.split('/').pop()), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    await pipeline(upstream, response);
+  } catch (error) {
+    if (cancel.signal.aborted) return;
+    LOG.warn('stream', 'clipboard', `从主机下载文件失败：${safeError(error)}`);
+    if (!response.headersSent) jsonResponse(response, 502, { ok: false, errorCode: 'FILES_FAILED', error: `从主机下载文件失败：${safeError(error)}` });
+    else response.destroy();
+  } finally {
+    response.off('close', onClose);
+  }
 }
 
 const SPEEDTEST_MAX_BYTES = 64 * 1024 * 1024;
@@ -3682,7 +3838,8 @@ async function handleApi(request, response, pathname) {
     return;
   }
   // The clipboard upload is raw bytes, read after the login check below.
-  const body = request.method === 'POST' && pathname !== '/api/bridge/clipboard' && pathname !== '/api/bridge/speedtest' ? await readBody(request) : {};
+  const rawBody = pathname === '/api/bridge/clipboard' || pathname === '/api/bridge/speedtest' || pathname.startsWith('/api/bridge/files/');
+  const body = request.method === 'POST' && !rawBody ? await readBody(request) : {};
   if (pathname === '/api/auth/status' && request.method === 'GET') {
     jsonResponse(response, 200, { ok: true, ...auth.status(request) });
     return;
@@ -3930,6 +4087,42 @@ async function handleApi(request, response, pathname) {
     response.end(data);
     return;
   }
+  // Files copied on the host: one of them, or a zip of all (files.mjs).
+  const hostFile = pathname.match(/^\/api\/bridge\/files\/([0-9a-f-]{36})\/([0-9]{1,5}|zip)$/);
+  if (hostFile && request.method === 'GET') {
+    await serveHostFile(request, response, hostFile[1], hostFile[2]);
+    return;
+  }
+  // Files copied in the browser: their list, sent to the host for pasting there.
+  if (pathname === '/api/bridge/files/offer' && request.method === 'POST') {
+    if (!activeSession) throw bridgeError('没有正在进行的串流', 'CLIPBOARD_UNAVAILABLE', { statusCode: 409 });
+    let value;
+    try { value = JSON.parse((await readRawBody(request, FILE_OFFER_MAX_BODY)).toString('utf8')); } catch (error) {
+      if (error?.statusCode === 413) throw error;
+      throw bridgeError('请求体必须是 JSON', 'BRIDGE_ERROR', { statusCode: 400 });
+    }
+    const checked = Files.checkEntries(value?.files);
+    if (checked.error) throw bridgeError(`文件列表不符合要求：${checked.error}`, 'FILES_INVALID', { statusCode: 400 });
+    const id = crypto.randomUUID();
+    await sendFileOfferToHost(activeSession, Files.encodeOffer(id, checked.entries, checked.totalSize));
+    localFileOffers.put(id, { hostId: activeSession.hostId, count: checked.entries.length });
+    LOG.info('stream', 'clipboard', `浏览器发来 ${checked.entries.length} 项文件，等待主机粘贴`);
+    jsonResponse(response, 200, { ok: true, id, count: checked.entries.length, totalSize: checked.totalSize });
+    return;
+  }
+  // A chunk the host asked for (handleHostFilePull), from the browser holding the files.
+  const fileChunk = pathname.match(/^\/api\/bridge\/files\/chunk\/([0-9a-f]{32})$/);
+  if (fileChunk && request.method === 'POST') {
+    const pending = pendingFilePulls.get(fileChunk[1]);
+    if (!pending) { jsonResponse(response, 404, { ok: false, errorCode: 'FILES_EXPIRED', error: '主机已不再等待这块数据' }); return; }
+    pendingFilePulls.delete(fileChunk[1]);
+    const word = String(request.headers['x-file-transfer-error'] || '');
+    const error = word ? (/^[a-z_]{1,32}$/.test(word) ? word : 'client_error') : null;
+    const data = error ? null : await readRawBody(request, pending.pull.length);
+    await answerFilePull(pending.session, pending.pull, data, error);
+    jsonResponse(response, 200, { ok: true });
+    return;
+  }
   // Throughput between this browser and the bridge (the interaction test): download a stream of bytes, or
   // upload one and get back how many arrived. Incompressible, so a proxy's gzip can't flatter it.
   if (pathname === '/api/bridge/speedtest' && request.method === 'GET') {
@@ -3968,7 +4161,7 @@ async function handleApi(request, response, pathname) {
 
 // Only the web client itself is served. Everything else in this directory (data with the pairing
 // key, password hashes and TLS keys, certs/, scripts, tests, backups, server sources) must never be readable.
-const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/touchbar.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/testbench.js', '/favicon.ico']);
+const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/files.js', '/touchbar.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/testbench.js', '/favicon.ico']);
 const isServableStatic = (requestedPath) => STATIC_FILES.has(requestedPath) || /^\/assets\/[\w.-]+\.(png|jpe?g|svg|webp|ico)$/i.test(requestedPath);
 
 function serveStatic(request, response, pathname) {

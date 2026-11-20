@@ -173,7 +173,8 @@
     // A download that has no bytes yet waits for the bridge to fetch it from the host.
     box.dataset.phase = phase === 'download' && !loaded ? 'fetch' : phase;
     box.dataset.direction = direction;
-    qs('.stream-transfer-label', box).textContent = t(`clipboard.progress.${receiving ? 'receive' : 'send'}${mime === 'text/plain' ? 'Text' : 'Image'}`);
+    box.dataset.mime = mime || '';
+    qs('.stream-transfer-label', box).textContent = t(`clipboard.progress.${receiving ? 'receive' : 'send'}${mime === 'text/plain' ? 'Text' : mime === 'files' ? 'Files' : 'Image'}`);
     const percent = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
     qs('.stream-transfer-value', box).textContent = phase === 'upload' || (phase === 'download' && loaded) ? `${percent}% · ${formatBytes(loaded)} / ${formatBytes(total)}`
       : phase === 'download' ? t('clipboard.progress.fetch')
@@ -192,6 +193,33 @@
         clipboardProgressTimer = setTimeout(() => { box.hidden = true; box.classList.remove('is-leaving'); }, 220);
       }, phase === 'done' ? 1200 : 2500);
     }
+  };
+
+  // Files copied on the host (files.js): a card with what was copied and how to get it here - one file
+  // downloads directly, several go into a folder the user picks (where the browser can) or a zip.
+  const renderFilesCard = () => {
+    const box = qs('#streamFiles');
+    if (!box) return;
+    const offer = state.fileTransfer?.hostOffer;
+    if (!offer) { box.hidden = true; return; }
+    const files = offer.files.filter((entry) => !entry.dir);
+    const single = files.length === 1 && offer.files.length === 1;
+    const canFolder = !single && state.fileTransfer.canSaveToFolder();
+    box.hidden = false;
+    qs('.stream-transfer-label', box).textContent = t('files.hostCopied', { count: files.length });
+    qs('.stream-transfer-value', box).textContent = formatBytes(offer.totalSize);
+    const names = offer.files.filter((entry) => !entry.path.includes('/')).map((entry) => entry.path);
+    const shown = names.slice(0, 3).join(t('files.separator')) + (names.length > 3 ? t('files.more', { count: names.length - 3 }) : '');
+    qs('.stream-transfer-detail', box).textContent = !single && !canFolder && !offer.zip ? `${shown} · ${t('files.needFolder')}` : shown;
+    qs('[data-action="files-download"]', box).hidden = !single;
+    qs('[data-action="files-folder"]', box).hidden = !canFolder;
+    qs('[data-action="files-zip"]', box).hidden = single || !offer.zip;
+    qs('[data-action="files-download"]', box).textContent = t('files.download');
+    qs('[data-action="files-folder"]', box).textContent = t('files.saveFolder');
+    qs('[data-action="files-zip"]', box).textContent = t('files.zip');
+    const dismiss = qs('[data-action="dismiss-files"]', box);
+    dismiss.title = t('files.dismiss');
+    dismiss.setAttribute('aria-label', t('files.dismiss'));
   };
 
   // Clipboard content at or over the size setting waits for an answer here (clipboard.js onConfirm): send it,
@@ -1512,6 +1540,9 @@
     stopStatsLoop();
     try { state.clipboardSync?.stop(); } catch { /* already stopped */ }
     state.clipboardSync = null;
+    state.fileTransfer?.cancel('receive');
+    state.fileTransfer = null;
+    renderFilesCard();
     answerTransfer(null);
     clearTimeout(clipboardProgressTimer);
     if (qs('#streamTransfer')) qs('#streamTransfer').hidden = true;
@@ -1728,6 +1759,11 @@
           state.clipboardSync?.setCapability(message.clipboard);
         } else if (message?.type === 'clipboard') {
           void state.clipboardSync?.receive(message);
+        } else if (message?.type === 'files') {
+          state.fileTransfer?.receive(message);
+          renderFilesCard();
+        } else if (message?.type === 'file-pull') {
+          void state.fileTransfer?.pull(message);
         } else if (message?.type === 'reconnecting') {
           state.reconnect = { source: 'host', attempt: message.attempt, max: message.maxAttempts, reason: message.reason };
           renderReconnect();
@@ -1795,8 +1831,24 @@
         scheduleGatewayRetry();
       },
     });
+    state.fileTransfer = window.SunbridgeFiles?.createFileTransfer({
+      onNotice: (kind, detail = {}) => {
+        if (generation !== state.mediaGatewayGeneration) return;
+        if (kind === 'sent') showToast(t('files.sentTitle'), t('files.sent', { count: detail.count, size: formatBytes(detail.size) }), 'success');
+        else if (kind === 'saved') showToast(t('files.savedTitle'), t('files.saved', { count: detail.count }), 'success');
+        else if (kind === 'too-many') showToast(t('clipboard.title'), t('files.tooMany'), 'warning');
+        else if (kind === 'save-failed') showToast(t('clipboard.title'), t('files.saveFailed', { error: errorMessage(detail.error) }), 'warning');
+        else showToast(t('clipboard.title'), t('files.sendFailed', { error: errorMessage(detail.error) }), 'warning');
+      },
+      onProgress: (progress) => { if (generation === state.mediaGatewayGeneration) renderClipboardProgress(progress); },
+    }) || null;
     state.clipboardSync = window.SunbridgeClipboard?.createClipboardSync({
       isEnabled: () => localStorage.getItem('sunbridge.setting.clipboard-sync') !== 'false',
+      // Files pasted or dropped: their list goes to the host. A held Ctrl+V is let go a moment later, once the
+      // host's agent has had the time to put them on its clipboard (it sends no word back for files).
+      onFiles: (snap) => (state.fileTransfer
+        ? state.fileTransfer.offer(snap).then(async (sent) => { if (sent) await new Promise((resolve) => setTimeout(resolve, 400)); return sent; })
+        : Promise.resolve(false)),
       onNotice: (kind, content, error, file, limits) => {
         if (generation !== state.mediaGatewayGeneration) return;
         if (kind === 'received') showToast(t('clipboard.received'), content.mime === 'text/plain' ? t('clipboard.receivedText', { count: content.data.length }) : t('clipboard.receivedImage'), 'success');
@@ -2624,7 +2676,15 @@
     if (action === 'toggle-follow-window') toggleFollowWindow();
     if (action === 'show-keyboard') showSoftKeyboard();
     if (action === 'send-clipboard') void state.clipboardSync?.sendNow();
-    if (action === 'cancel-transfer') state.clipboardSync?.cancel(qs('#streamTransfer')?.dataset.direction);
+    if (action === 'cancel-transfer') {
+      const box = qs('#streamTransfer');
+      if (box?.dataset.mime === 'files') state.fileTransfer?.cancel(box.dataset.direction);
+      else state.clipboardSync?.cancel(box?.dataset.direction);
+    }
+    if (action === 'files-download') state.fileTransfer?.download(0);
+    if (action === 'files-zip') state.fileTransfer?.download('zip');
+    if (action === 'files-folder') void state.fileTransfer?.saveToFolder();
+    if (action === 'dismiss-files') { state.fileTransfer?.dismiss(); renderFilesCard(); }
     if (action === 'resume-session' && state.activeRemoteSession) void resumeStream(state.activeRemoteSession);
     if (action === 'end-active-session') void (async () => { try { await bridge.stop(); } catch (error) { showToast(t('session.stopFailed'), errorMessage(error), 'warning'); } state.activeRemoteSession = null; renderResumeBar(); })();
     if (action === 'host-unpair') void handleHostUnpair(actionTarget);
