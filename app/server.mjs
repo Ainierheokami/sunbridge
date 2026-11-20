@@ -3379,7 +3379,7 @@ function handleHostFileOffer(session, payload) {
   hostFileOffers.put(offer.id, { hostId: session.hostId, offer }, offer.expiresInMs);
   LOG.info('stream', 'clipboard', `主机复制了 ${offer.entries.length} 项文件（${offer.totalSize} 字节）`);
   broadcastGatewayJson(session, {
-    type: 'files', id: offer.id, kind: offer.type, totalSize: offer.totalSize, zip: Files.zipFits(offer.entries),
+    type: 'files', id: offer.id, source: offer.source, totalSize: offer.totalSize, zip: Files.zipFits(offer.entries),
     files: offer.entries.map(({ path: name, size, dir }) => ({ path: name, size, dir })),
   });
 }
@@ -3483,13 +3483,13 @@ async function serveHostFile(request, response, id, which) {
       const top = new Set(offer.entries.map((entry) => entry.path.split('/')[0]));
       const name = top.size === 1 ? `${[...top][0]}.zip` : 'files.zip';
       response.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': Files.zipSize(offer.entries), 'Content-Disposition': attachmentHeader(name), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
-      await pipeline(Readable.from(Files.zipEntries(offer.entries, (index) => streamFromHost(host, `/api/v1/file-transfer/${id}/${index}`, cancel.signal))), response);
+      await pipeline(Readable.from(Files.zipEntries(offer.entries, (index) => streamFromHost(host, Files.fileRoute(offer, index), cancel.signal))), response);
       return;
     }
     const index = Number(which);
     const entry = offer.entries[index];
     if (!entry || entry.dir) { jsonResponse(response, 404, { ok: false, errorCode: 'FILES_EXPIRED', error: '没有这个文件' }); return; }
-    const upstream = await streamFromHost(host, `/api/v1/file-transfer/${id}/${index}`, cancel.signal);
+    const upstream = await streamFromHost(host, Files.fileRoute(offer, index), cancel.signal);
     response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': entry.size, 'Content-Disposition': attachmentHeader(entry.path.split('/').pop()), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     await pipeline(upstream, response);
   } catch (error) {
@@ -4088,7 +4088,7 @@ async function handleApi(request, response, pathname) {
     return;
   }
   // Files copied on the host: one of them, or a zip of all (files.mjs).
-  const hostFile = pathname.match(/^\/api\/bridge\/files\/([0-9a-f-]{36})\/([0-9]{1,5}|zip)$/);
+  const hostFile = pathname.match(/^\/api\/bridge\/files\/([0-9a-f]{64})\/([0-9]{1,5}|zip)$/);
   if (hostFile && request.method === 'GET') {
     await serveHostFile(request, response, hostFile[1], hostFile[2]);
     return;
@@ -4103,7 +4103,7 @@ async function handleApi(request, response, pathname) {
     }
     const checked = Files.checkEntries(value?.files);
     if (checked.error) throw bridgeError(`文件列表不符合要求：${checked.error}`, 'FILES_INVALID', { statusCode: 400 });
-    const id = crypto.randomUUID();
+    const id = Files.newOfferId();
     await sendFileOfferToHost(activeSession, Files.encodeOffer(id, checked.entries, checked.totalSize));
     localFileOffers.put(id, { hostId: activeSession.hostId, count: checked.entries.length });
     LOG.info('stream', 'clipboard', `浏览器发来 ${checked.entries.length} 项文件，等待主机粘贴`);

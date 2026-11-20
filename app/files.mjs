@@ -1,7 +1,9 @@
 // Files copied with Foundation Sunshine's clipboard sync (both directions), on top of clipboard.mjs's frames:
 //   kind 4 (file offer): a UTF-8 JSON list of the files copied on one side,
-//     {"id": "<uuid>", "type": "clipboard"|"send", "total_size": N, "expires_in": S,
-//      "files": [{"path": "dir/a.txt", "size": N, "dir": false, "mtime": T}, ...]}
+//     {"version": 2, "id": "<64 hex>", "type": "file"|"files", "source": "clipboard"|"send", "total_size": N,
+//      "expires_in": S, "files": [{"path": "dir/a.txt", "size": N, "dir": false, "mtime": T}, ...]}
+//     The first, single-file version sent only {"id", "type": "file", "name", "size", "download_url"}, its
+//     file at GET /api/v1/file-transfer/<id>: that is read as a list of that one file.
 //     paths relative and '/'-separated, every folder listed before what it holds. A long list travels as a
 //     clipboard blob of mime OFFER_MIME behind a kind 3 reference.
 //   host -> here: each file is fetched from the paired HTTPS port, GET /api/v1/file-transfer/<id>/<index>
@@ -11,6 +13,7 @@
 //     POST /api/v1/file-transfer/chunk/<ticket> with the bytes (fewer only at the end of the file), or an empty
 //     body with "X-File-Transfer-Error: <word>". The browser holds the files, so the bridge asks it for each chunk.
 // The rules a paste target trusts (no traversal, names Windows accepts, MAX_PATH) are checked on both sides.
+import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 
 export const KIND_FILE_OFFER = 4;
@@ -22,13 +25,15 @@ export const MAX_CHUNK = 4 * 1024 * 1024;
 export const OFFER_TTL_MS = 60 * 60 * 1000;
 export const MAX_OFFERS = 8;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const OFFER_ID = /^[0-9a-f]{64}$/;
 const TICKET = /^[0-9a-f]{32}$/;
 const RESERVED = new Set(['CON', 'PRN', 'AUX', 'NUL', ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`COM${n}`, `LPT${n}`])]);
 // eslint-disable-next-line no-control-regex
 const BAD_CHARS = /[<>:"/\\|?*\u0000-\u001f]/;
 
-export const isOfferId = (id) => UUID.test(String(id));
+export const isOfferId = (id) => OFFER_ID.test(String(id));
+// A new offer id: 32 random bytes, the shape Sunshine's offers use.
+export const newOfferId = () => crypto.randomBytes(32).toString('hex');
 export const isTicket = (ticket) => TICKET.test(String(ticket));
 
 function validName(name) {
@@ -68,21 +73,35 @@ export function checkEntries(files) {
   return { entries, totalSize };
 }
 
-// A kind 4 payload: { id, type, entries, totalSize, expiresInMs } or null.
+// A kind 4 payload: { id, source, entries, totalSize, expiresInMs, singleFileRoute } or null. singleFileRoute:
+// a single-file offer of the first version, its file at /api/v1/file-transfer/<id> instead of .../<id>/0.
 export function parseOffer(payload) {
   let value;
   try { value = JSON.parse(Buffer.from(payload).toString('utf8')); } catch { return null; }
   if (!value || typeof value !== 'object' || !isOfferId(value.id)) return null;
-  const checked = checkEntries(value.files);
+  if (value.type !== undefined && value.type !== '' && value.type !== 'file' && value.type !== 'files') return null;
+  let files = value.files;
+  let singleFileRoute = false;
+  if (!Array.isArray(files)) {
+    if (value.type === 'files') return null;
+    if (value.download_url && value.download_url !== `/api/v1/file-transfer/${value.id}`) return null;
+    files = [{ path: value.name, size: value.size, dir: false, mtime: 0 }];
+    singleFileRoute = true;
+  }
+  const checked = checkEntries(files);
   if (checked.error) return null;
   const expiresIn = wholeNumber(value.expires_in) && value.expires_in > 0 ? Math.min(value.expires_in * 1000, OFFER_TTL_MS) : OFFER_TTL_MS;
-  return { id: value.id, type: value.type === 'send' ? 'send' : 'clipboard', entries: checked.entries, totalSize: checked.totalSize, expiresInMs: expiresIn };
+  const source = singleFileRoute || value.source === 'send' ? 'send' : 'clipboard';
+  return { id: value.id, source, entries: checked.entries, totalSize: checked.totalSize, expiresInMs: expiresIn, singleFileRoute };
 }
+
+// Where a host offer's file is fetched from.
+export const fileRoute = (offer, index) => (offer.singleFileRoute ? `/api/v1/file-transfer/${offer.id}` : `/api/v1/file-transfer/${offer.id}/${index}`);
 
 // The kind 4 payload of files offered from here.
 export function encodeOffer(id, entries, totalSize) {
   return Buffer.from(JSON.stringify({
-    id, type: 'clipboard', total_size: totalSize, expires_in: OFFER_TTL_MS / 1000,
+    version: 2, id, type: 'files', source: 'clipboard', total_size: totalSize, expires_in: OFFER_TTL_MS / 1000,
     files: entries.map(({ path, size, dir, mtime }) => ({ path, size, dir, mtime })),
   }));
 }
