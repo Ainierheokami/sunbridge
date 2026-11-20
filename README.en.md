@@ -93,6 +93,8 @@ Run `./start.sh help` (`start.bat help` on Windows) to see all management comman
 
 Shortcuts: Ctrl+Alt+Shift+Z releases the mouse, Ctrl+Alt+Shift+Q ends the stream, Ctrl+Alt+Shift+S toggles the stream statistics.
 
+Open **Quick settings → Video sharpening** on the stream toolbar to toggle it live. It is off by default and saved in this browser. It resamples the picture for the display and gently enhances details. Browsers without WebGL 2 use high-quality scaling instead.
+
 **Settings → Appearance and text** switches between light, dark and system themes and enlarges the text (Large / Extra large); it applies to the current browser only.
 
 ### Autostart

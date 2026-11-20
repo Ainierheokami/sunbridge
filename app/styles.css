@@ -608,7 +608,7 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 /* ---- Quick settings drawer ---------------------------------------------------------- */
 .settings-drawer {
   position: fixed; top: 0; right: 0; z-index: 115;
-  display: flex; width: min(23rem, 100vw); height: 100vh; flex-direction: column;
+  display: flex; width: min(23rem, 100vw); height: 100vh; height: 100dvh; flex-direction: column; overflow-y: auto;
   padding: 1.5rem 1.25rem;
   border-left: 1px solid var(--separator);
   background: var(--bg);
@@ -630,6 +630,10 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 .drawer-section .drawer-setting:first-of-type { border-radius: var(--radius-md) var(--radius-md) 0 0; }
 .drawer-section .drawer-setting:last-child { border-bottom: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); }
 .drawer-setting select { min-width: 10rem; }
+.drawer-sharpness { padding-block: 0.625rem; }
+.drawer-sharpness > span { display: grid; gap: 0.125rem; }
+.drawer-sharpness small { color: var(--text-3); }
+.drawer-sharpness .toggle { flex: none; }
 .drawer-footer { margin-top: auto; padding-top: 1.25rem; }
 
 /* ---- Streaming (always dark: it frames video) --------------------------------------- */

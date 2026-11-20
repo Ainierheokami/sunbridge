@@ -246,6 +246,7 @@ importScripts('media.js');
   self.onmessage = (event) => {
     const message = event.data || {};
     if (message.type === 'open') open(message);
+    else if (message.type === 'video-display') pipeline?.setDisplay(message.display);
     else if (message.type === 'audio-port') attachAudio(message.port);
     else if (message.type === 'rtc-channels') attachRtc(message);
     else if (message.type === 'send') {

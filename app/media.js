@@ -1183,6 +1183,127 @@
 
   const FRAME_HEADER_BYTES = 12;
 
+  function createSharpener() {
+    const surface = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(1, 1) : globalThis.document?.createElement('canvas');
+    const gl = surface?.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false });
+    if (!gl) return null;
+    const compile = (type, source) => {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+      return shader;
+    };
+    const vertex = compile(gl.VERTEX_SHADER, `#version 300 es
+      out vec2 uv;
+      void main() {
+        vec2 corner = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+        gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+        uv = vec2(corner.x, 1.0 - corner.y);
+      }`);
+    const fragment = compile(gl.FRAGMENT_SHADER, `#version 300 es
+      precision highp float;
+      uniform sampler2D image;
+      uniform vec2 pixel;
+      in vec2 uv;
+      out vec4 color;
+      const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+      void main() {
+        vec3 rgb = texture(image, uv).rgb;
+        float center = dot(rgb, luma);
+        vec2 horizontal = vec2(pixel.x, 0.0);
+        vec2 vertical = vec2(0.0, pixel.y);
+        float left = dot(texture(image, uv - horizontal).rgb, luma);
+        float right = dot(texture(image, uv + horizontal).rgb, luma);
+        float top = dot(texture(image, uv - vertical).rgb, luma);
+        float bottom = dot(texture(image, uv + vertical).rgb, luma);
+        float low = min(center, min(min(left, right), min(top, bottom)));
+        float high = max(center, max(max(left, right), max(top, bottom)));
+        float strength = 0.55 * smoothstep(0.025, 0.14, high - low);
+        float detail = strength * (center - (left + right + top + bottom) * 0.25);
+        float limited = clamp(detail, max(low - center, -0.065), min(high - center, 0.065));
+        float lower = -min(rgb.r, min(rgb.g, rgb.b));
+        float upper = 1.0 - max(rgb.r, max(rgb.g, rgb.b));
+        color = vec4(rgb + clamp(limited, lower, upper), 1.0);
+      }`);
+    const program = gl.createProgram();
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    gl.deleteShader(vertex);
+    gl.deleteShader(fragment);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+    gl.useProgram(program);
+    const pixel = gl.getUniformLocation(program, 'pixel');
+    gl.uniform2f(pixel, 1, 1);
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const textureLimit = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    let lastFrameWidth;
+    let lastFrameHeight;
+    return {
+      draw(frame, sourceWidth, sourceHeight, width, height) {
+        if (gl.isContextLost() || Math.max(sourceWidth, sourceHeight, width, height) > textureLimit) return null;
+        if (surface.width !== width || surface.height !== height) {
+          surface.width = width;
+          surface.height = height;
+          gl.viewport(0, 0, width, height);
+          gl.uniform2f(pixel, 1 / width, 1 / height);
+        }
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+        const shrinking = width < sourceWidth || height < sourceHeight;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, shrinking ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+        if (shrinking) gl.generateMipmap(gl.TEXTURE_2D);
+        if (sourceWidth !== lastFrameWidth || sourceHeight !== lastFrameHeight) {
+          if (gl.getError() !== gl.NO_ERROR) return null;
+          lastFrameWidth = sourceWidth;
+          lastFrameHeight = sourceHeight;
+        }
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        return surface;
+      },
+      close() { gl.getExtension('WEBGL_lose_context')?.loseContext(); },
+    };
+  }
+
+  function createVideoPresentation(target, context) {
+    let display = null;
+    let sharpener;
+    return {
+      setDisplay(next) { display = next; },
+      draw(frame, sourceWidth, sourceHeight) {
+        const scale = display ? Math.min(
+          display.width / sourceWidth, display.height / sourceHeight,
+          4096 / Math.max(sourceWidth, sourceHeight), Math.sqrt(8294400 / (sourceWidth * sourceHeight)),
+        ) : 1;
+        const width = Math.max(1, Math.round(sourceWidth * scale));
+        const height = Math.max(1, Math.round(sourceHeight * scale));
+        let image = frame;
+        if (display) {
+          try {
+            if (sharpener === undefined) sharpener = createSharpener();
+            if (sharpener) {
+              const rendered = sharpener.draw(frame, sourceWidth, sourceHeight, width, height);
+              if (rendered) image = rendered;
+              else { sharpener.close(); sharpener = null; }
+            }
+          } catch {
+            sharpener?.close();
+            sharpener = null;
+          }
+        }
+        if (target.width !== width) target.width = width;
+        if (target.height !== height) target.height = height;
+        context.imageSmoothingQuality = image === frame && display ? 'high' : 'low';
+        context.drawImage(image, 0, 0, width, height);
+      },
+      close() { sharpener?.close(); },
+    };
+  }
+
   function createVideoPipeline(canvas, options = {}) {
     const target = canvas || null;
     const callbacks = options.callbacks || options;
@@ -1234,7 +1355,7 @@
       && target
       && typeof target.getContext === 'function';
     let decoder = null;
-    let context = null;
+    let presentation = null;
     let current = null;
     let closed = false;
     let timestampFallback = 0;
@@ -1291,14 +1412,16 @@
       scheduleRefresh();
     };
     const makeCanvas = (frame) => {
-      if (!target || !context) return;
+      if (!presentation) return;
       const width = frame.displayWidth || frame.codedWidth || target.width || 1;
       const height = frame.displayHeight || frame.codedHeight || target.height || 1;
-      if (target.width !== width) target.width = width;
-      if (target.height !== height) target.height = height;
+      if (target.dataset && (state.width !== width || state.height !== height)) {
+        target.dataset.videoWidth = width;
+        target.dataset.videoHeight = height;
+      }
       state.width = width;
       state.height = height;
-      try { context.drawImage(frame, 0, 0, width, height); } catch (error) { fail(error); }
+      try { presentation.draw(frame, width, height); } catch (error) { fail(error); }
     };
     const updateDecoderFormat = (info) => {
       if (state.codecFamily !== 'h264') {
@@ -1487,7 +1610,11 @@
       setState('unsupported');
     } else {
       try {
-        context = target.getContext('2d', { alpha: false, desynchronized: true });
+        const context = target.getContext('2d', { alpha: false, desynchronized: true });
+        if (context) {
+          presentation = createVideoPresentation(target, context);
+          presentation.setDisplay(options.display);
+        }
         decoder = createDecoder();
       } catch (error) {
         decoder = null;
@@ -1608,12 +1735,14 @@
       closed = true;
       current = null;
       if (pendingFrame) { pendingFrame.close(); pendingFrame = null; }
+      presentation?.close();
       try { if (decoder && decoder.state !== 'closed') decoder.close(); } catch { /* already closed */ }
       setState('stopped');
     };
     return {
       get state() { return state.state; },
       get stats() { return { ...state }; },
+      setDisplay(display) { presentation?.setDisplay(display); },
       ingest,
       stop,
       flush() { finalizeFrame(); },
@@ -1766,6 +1895,7 @@
       worker: true,
       get state() { return stats.state; },
       get stats() { return { ...stats }; },
+      setDisplay(display) { if (socket.readyState < 2) worker.postMessage({ type: 'video-display', display }); },
       ingest: () => false,
       stop: () => {},
       flush: () => {},

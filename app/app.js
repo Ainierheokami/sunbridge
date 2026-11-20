@@ -443,11 +443,6 @@
       setText('.drawer-head h2', t('drawer.defaults'), drawer);
       qsa('.drawer-section-label', drawer).forEach((node, index) => { node.textContent = index === 0 ? t('settings.video') : t('settings.inputUi'); });
       setText('.drawer-footer .text-button', t('drawer.openAll'), drawer);
-      const drawerRows = qsa('.drawer-setting', drawer);
-      if (drawerRows[0]) setText('span', t('drawer.quality'), drawerRows[0]);
-      if (drawerRows[1]) setText('span', t('drawer.hdr'), drawerRows[1]);
-      if (drawerRows[2]) setText('span', t('drawer.pointer'), drawerRows[2]);
-      if (drawerRows[3]) setText('span', t('drawer.stats'), drawerRows[3]);
     }
     const modal = qs('#pairModal');
     if (modal) {
@@ -1536,7 +1531,12 @@
     state.mediaGateway.send({ type: 'request-idr' });
   };
 
+  let refreshVideoDisplay = null;
+  let disconnectVideoDisplay = null;
   const stopMediaGateway = () => {
+    disconnectVideoDisplay?.();
+    disconnectVideoDisplay = null;
+    refreshVideoDisplay = null;
     stopStatsLoop();
     try { state.clipboardSync?.stop(); } catch { /* already stopped */ }
     state.clipboardSync = null;
@@ -1622,6 +1622,35 @@
     width: Number(canvas?.dataset.videoWidth) || canvas?.width || 0,
     height: Number(canvas?.dataset.videoHeight) || canvas?.height || 0,
   });
+
+  const observeVideoDisplay = (canvas, pipeline) => {
+    let previous;
+    const update = (entry) => {
+      let display = null;
+      if (qs('[data-toggle="video-sharpness"]')?.getAttribute('aria-pressed') === 'true') {
+        const pixels = entry?.devicePixelContentBoxSize?.[0];
+        const rect = pixels ? null : canvas.getBoundingClientRect();
+        const width = pixels ? pixels.inlineSize : Math.round(rect.width * window.devicePixelRatio);
+        const height = pixels ? pixels.blockSize : Math.round(rect.height * window.devicePixelRatio);
+        if (width > 0 && height > 0) display = { width, height };
+      }
+      if (previous?.width === display?.width && previous?.height === display?.height) return;
+      previous = display;
+      pipeline.setDisplay(display);
+    };
+    refreshVideoDisplay = update;
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(([entry]) => update(entry)) : null;
+    if (observer) {
+      try { observer.observe(canvas, { box: 'device-pixel-content-box' }); } catch { observer.observe(canvas); }
+    }
+    const resize = () => update();
+    window.addEventListener('resize', resize);
+    disconnectVideoDisplay = () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+    };
+    resize();
+  };
 
   const startMediaGateway = (session) => {
     stopMediaGateway();
@@ -1869,6 +1898,7 @@
       state.videoPipeline = state.mediaGateway?.videoPipeline || null;
       state.videoDecoderState = state.videoPipeline ? state.videoPipeline.state : 'unsupported';
     }
+    if (canvas && state.videoPipeline?.setDisplay) observeVideoDisplay(canvas, state.videoPipeline);
     // Hand the worklet's port to the worker once the worklet is loaded; if it can't load, decode audio here
     // (the worker then passes the audio envelopes on).
     if (state.audioPipeline?.worker) {
@@ -2464,9 +2494,24 @@
     document.body.style.overflow = ''; document.body.classList.remove('is-streaming'); state.stopping = false; state.activeRemoteSession = null; renderAll(); renderResumeBar(); if (stopError) showToast(t('session.stopFailed'), errorMessage(stopError), 'warning'); else showToast(t('session.ended'), t('session.disconnected', { app: appName }), 'success');
   };
 
-  const openSettings = () => { const drawer = qs('#settingsDrawer'); if (drawer) { drawer.classList.add('is-open'); drawer.setAttribute('aria-hidden', 'false'); } };
+  const placeSettingsDrawer = () => {
+    const drawer = qs('#settingsDrawer');
+    const fullscreenStream = document.fullscreenElement?.id === 'streamOverlay' ? document.fullscreenElement : null;
+    const parent = fullscreenStream || document.body;
+    if (drawer && drawer.parentElement !== parent) parent.append(drawer);
+    return drawer;
+  };
+  const openSettings = () => { const drawer = placeSettingsDrawer(); if (drawer) { drawer.classList.add('is-open'); drawer.setAttribute('aria-hidden', 'false'); } };
   const closeSettings = () => { const drawer = qs('#settingsDrawer'); if (drawer) { drawer.classList.remove('is-open'); drawer.setAttribute('aria-hidden', 'true'); } };
-  const toggleSetting = (toggle) => { const isOn = toggle.classList.toggle('is-on'); toggle.setAttribute('aria-pressed', String(isOn)); if (toggle.dataset.toggle === 'reduce-motion') document.documentElement.classList.toggle('reduce-motion', isOn); if (toggle.dataset.toggle === 'local-cursor') document.documentElement.classList.toggle('local-cursor', isOn); localStorage.setItem('sunbridge.setting.' + toggle.dataset.toggle, String(isOn)); showToast(isOn ? t('settings.enabled') : t('settings.disabled'), t('settings.updated'), 'success'); };
+  const toggleSetting = (toggle) => {
+    const isOn = toggle.classList.toggle('is-on');
+    const setting = toggle.dataset.toggle;
+    toggle.setAttribute('aria-pressed', String(isOn));
+    if (setting === 'reduce-motion' || setting === 'local-cursor') document.documentElement.classList.toggle(setting, isOn);
+    if (setting === 'video-sharpness') refreshVideoDisplay?.();
+    try { localStorage.setItem('sunbridge.setting.' + setting, String(isOn)); } catch { /* private mode */ }
+    showToast(isOn ? t('settings.enabled') : t('settings.disabled'), t('settings.updated'), 'success');
+  };
   const clearActivity = () => { state.activity = []; saveActivity(); renderActivity(); showToast(t('toast.activityCleared'), t('toast.activityReady')); };
 
   const copyPorts = async () => {
@@ -2740,6 +2785,7 @@
   // Fullscreen: capture system keys (Win, Alt+Tab, Esc) for the host where the browser allows it.
   document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement) navigator.keyboard?.unlock?.(); // enterFullscreen() locks it
+    placeSettingsDrawer();
     applyControlModeUi();
   });
   // Ctrl+W, Ctrl+R and the like can't be kept from the browser outside fullscreen: ask before leaving a stream.
