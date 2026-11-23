@@ -637,7 +637,7 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 .drawer-footer { margin-top: auto; padding-top: 1.25rem; }
 
 /* ---- Streaming (always dark: it frames video) --------------------------------------- */
-.stream-overlay { position: fixed; inset: 0; z-index: 100; color: #f5f5f7; background: #000; animation: stream-in 200ms ease both; color-scheme: dark; }
+.stream-overlay { position: fixed; inset: 0; z-index: 100; width: 100%; height: 100dvh; color: #f5f5f7; background: #000; animation: stream-in 200ms ease both; color-scheme: dark; }
 @keyframes stream-in { from { opacity: 0; } to { opacity: 1; } }
 .stream-shell { display: grid; width: 100%; height: 100%; grid-template-columns: minmax(0, 1fr); grid-template-rows: 3.25rem 1fr 2.25rem; }
 .stream-header, .stream-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0 1rem; background: #1c1c1e; }
@@ -662,7 +662,7 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 .stream-end-button:hover { background: #ff5b51; }
 .stream-end-button svg { width: 0.75rem; height: 0.75rem; }
 .footer-separator { width: 1px; height: 0.75rem; background: rgba(255, 255, 255, 0.16); }
-.stream-stage { position: relative; overflow: hidden; background: #000; }
+.stream-stage { position: relative; overflow: hidden; background: #000; touch-action: none; }
 .stream-video-canvas { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; background: #000; opacity: 0; transition: opacity 200ms ease; touch-action: none; cursor: crosshair; }
 .stream-overlay[data-control-mode="desktop"] .stream-video-canvas { cursor: default; }
 .stream-overlay[data-video-state="playing"] .stream-video-canvas { opacity: 1; }
@@ -718,7 +718,7 @@ body.is-streaming .app-shell { display: none; }
 .touchbar-segment button { min-height: 2.25rem; border: 0; border-radius: calc(var(--radius-sm) - 2px); color: #d0d0d5; background: transparent; font-size: 0.875rem; }
 .touchbar-segment button[aria-pressed="true"] { color: #fff; background: rgba(255, 255, 255, 0.18); font-weight: 600; }
 .touchbar-hint { margin: 0; padding: 0.25rem 0.625rem 0.375rem; color: #8e8e93; font-size: 0.75rem; line-height: 1.45; }
-.touchbar-keys { position: absolute; right: 0; left: 0; z-index: 21; display: flex; gap: 0.375rem; padding: 0.375rem calc(0.5rem + env(safe-area-inset-right)) 0.375rem calc(0.5rem + env(safe-area-inset-left)); overflow-x: auto; overscroll-behavior: contain; background: rgba(28, 28, 30, 0.96); border-top: 1px solid rgba(255, 255, 255, 0.08); scrollbar-width: none; touch-action: pan-x; }
+.touchbar-keys { position: fixed; right: 0; left: 0; z-index: 21; display: flex; gap: 0.375rem; padding: 0.375rem calc(0.5rem + env(safe-area-inset-right)) 0.375rem calc(0.5rem + env(safe-area-inset-left)); overflow-x: auto; overscroll-behavior: contain; background: rgba(28, 28, 30, 0.96); border-top: 1px solid rgba(255, 255, 255, 0.08); scrollbar-width: none; touch-action: pan-x; }
 .touchbar-keys::-webkit-scrollbar { display: none; }
 .touchbar-keys button { flex: 0 0 auto; min-width: 2.75rem; height: 2.5rem; padding: 0 0.625rem; border: 0; border-radius: var(--radius-sm); color: #f5f5f7; background: rgba(255, 255, 255, 0.12); font-size: 0.875rem; font-variant-numeric: tabular-nums; }
 .touchbar-keys button:active { background: rgba(255, 255, 255, 0.24); }
@@ -761,7 +761,7 @@ body.is-streaming .app-shell { display: none; }
 .stream-transfer[data-phase="failed"] .stream-transfer-value { color: #ff6961; }
 .stream-transfer[data-phase="cancelled"] .stream-transfer-track i { width: 100%; background: #8e8e93; }
 @keyframes stream-transfer-busy { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
-.stream-keyboard-input { position: absolute; bottom: 0; left: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; resize: none; pointer-events: none; font-size: 16px; }
+.stream-keyboard-input { position: fixed; top: 0; left: 0; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; resize: none; pointer-events: none; font-size: 16px; }
 
 /* Live stats: in the footer's right corner (clear of the header's buttons); the detail panel opens upwards
    over the video. In fullscreen, where the footer is gone, the bar floats at the video's bottom-right.

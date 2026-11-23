@@ -54,7 +54,9 @@
     // ----- position: an edge (left / right) and a height, as a fraction of the overlay -----
     let position = readJson(POSITION_KEY) || { side: 'right', y: 0.62 };
     const place = () => {
-      const height = overlay.clientHeight || window.innerHeight;
+      const viewport = window.visualViewport;
+      const keyboardOpen = document.activeElement === keyboardInput && viewport && viewport.height < window.innerHeight - 80;
+      const height = keyboardOpen ? viewport.height : (overlay.clientHeight || window.innerHeight);
       const size = fab.offsetHeight || 48;
       const y = Math.max(EDGE_PX, Math.min(height - size - EDGE_PX, position.y * height));
       root.style.top = y + 'px';
@@ -136,9 +138,9 @@
     // ----- key bar, above the soft keyboard -----
     const placeKeys = () => {
       const viewport = window.visualViewport;
-      // The bottom of what is visible, from the same visual viewport snapshot: anchoring to innerHeight instead
-      // left a gap or a hidden bar when the URL bar or the page scroll moved while the keyboard came up.
-      const bottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+      // Keep the bar attached to the visible viewport. Using the layout viewport here leaves a gap above the
+      // keyboard on mobile browsers that resize or pan the visual viewport independently.
+      const bottom = viewport?.height || window.innerHeight;
       keybar.style.top = Math.max(0, bottom - keybar.offsetHeight) + 'px';
     };
     const keysOpen = () => document.activeElement === keyboardInput;
@@ -161,12 +163,12 @@
       renderKeys();
     });
     if (keyboardInput) {
-      on(keyboardInput, 'focus', renderKeys);
-      on(keyboardInput, 'blur', () => { options.clearModifiers?.(); renderKeys(); });
+      on(keyboardInput, 'focus', () => { renderKeys(); place(); });
+      on(keyboardInput, 'blur', () => { options.clearModifiers?.(); renderKeys(); place(); });
     }
     if (window.visualViewport) {
-      on(window.visualViewport, 'resize', () => { if (!keybar.hidden) placeKeys(); });
-      on(window.visualViewport, 'scroll', () => { if (!keybar.hidden) placeKeys(); });
+      on(window.visualViewport, 'resize', () => { place(); if (!keybar.hidden) placeKeys(); });
+      on(window.visualViewport, 'scroll', () => { place(); if (!keybar.hidden) placeKeys(); });
     }
 
     function render() {

@@ -2240,8 +2240,12 @@
   };
   const showSoftKeyboard = () => {
     const input = qs('#streamKeyboardInput'); if (!input) return;
+    const scroll = document.scrollingElement;
+    const scrollTop = scroll?.scrollTop || 0;
     input.value = '';
     input.focus({ preventScroll: true });
+    if (scroll && scroll.scrollTop !== scrollTop) scroll.scrollTop = scrollTop;
+    requestAnimationFrame(() => { if (scroll) scroll.scrollTop = scrollTop; });
   };
 
   // ---------------------------------------------------------------------------

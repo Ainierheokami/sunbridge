@@ -103,6 +103,7 @@
     let pendingDx = 0;
     let pendingDy = 0;
     let pendingAbs = null;
+    let motionFrame = null;
     let wheelRemainder = 0;
     let hwheelRemainder = 0;
     let gamepadFrame = null;
@@ -150,6 +151,13 @@
       if (flushScheduled) return;
       flushScheduled = true;
       queueMicrotask(flush);
+    };
+    const scheduleMotion = () => {
+      if (motionFrame != null) return;
+      motionFrame = requestAnimationFrame(() => {
+        motionFrame = null;
+        flush();
+      });
     };
 
     // A promise resolving false drops the held V presses (the paste waits for the user: see beforePaste);
@@ -313,7 +321,7 @@
       } else {
         return;
       }
-      schedule();
+      scheduleMotion();
     });
     on(canvas, 'contextmenu', (event) => { if (active()) event.preventDefault(); });
     on(canvas, 'wheel', (event) => {
@@ -332,9 +340,9 @@
     }, { passive: false });
 
     // ----- touch gestures (desktop mode) -----
-    // Direct: one finger tap = click there, drag = left-button drag, hold = right click.
-    // Trackpad: one finger drag = move the cursor, tap = click where the cursor is, tap then drag = left-button
-    // drag, hold = right click.
+    // Direct: one finger tap = click there, drag or long-press then drag = left-button drag.
+    // Trackpad: one finger drag = move the cursor, tap = click where the cursor is, tap then drag or long-press
+    // then drag = left-button drag.
     // Both: two fingers tap = right click, drag = scroll.
     const touches = new Map();
     let gesture = null;
@@ -359,7 +367,7 @@
       const y = Math.trunc(relRemainderY);
       relRemainderX -= x;
       relRemainderY -= y;
-      if (x || y) { pendingDx += x; pendingDy += y; schedule(); }
+      if (x || y) { pendingDx += x; pendingDy += y; scheduleMotion(); }
     };
     const clickHere = (button) => {
       flush();
@@ -368,7 +376,7 @@
     };
     const moveTo = (x, y) => {
       const point = videoPoint(canvas, x, y);
-      if (point) { pendingAbs = point; schedule(); }
+      if (point) { pendingAbs = point; scheduleMotion(); }
       return point;
     };
     const click = (button, x, y) => {
@@ -382,6 +390,17 @@
       if (gesture?.dragging) push({ kind: 'mouse-button', button: 1, down: false });
       gesture = null;
     };
+    const beginLeftDrag = () => {
+      if (!gesture || gesture.dragging) return;
+      gesture.dragging = true;
+      if (gesture.trackpad) {
+        flush();
+      } else {
+        moveTo(gesture.startX, gesture.startY);
+        flush();
+      }
+      push({ kind: 'mouse-button', button: 1, down: true });
+    };
     on(canvas, 'pointerdown', (event) => {
       if (!active() || event.pointerType !== 'touch' || !desktopMode()) return;
       event.preventDefault();
@@ -392,8 +411,7 @@
         gesture.timer = setTimeout(() => {
           if (!gesture || gesture.moved || gesture.fingers !== 1) return;
           gesture.longPressed = true;
-          if (gesture.trackpad) clickHere(3);
-          else click(3, gesture.startX, gesture.startY);
+          beginLeftDrag();
         }, LONG_PRESS_MS);
       } else if (touches.size === 2 && gesture) {
         clearTimeout(gesture.timer);
@@ -404,6 +422,7 @@
     });
     on(window, 'pointermove', (event) => {
       if (!active() || event.pointerType !== 'touch' || !desktopMode() || !touches.has(event.pointerId) || !gesture) return;
+      event.preventDefault();
       const previous = touches.get(event.pointerId);
       const now = performance.now();
       touches.set(event.pointerId, { x: event.clientX, y: event.clientY, at: now });
@@ -411,7 +430,11 @@
         if (!gesture.moved && Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < TAP_SLOP_PX) return;
         gesture.moved = true;
         clearTimeout(gesture.timer);
-        if (gesture.longPressed) return;
+        if (gesture.longPressed) {
+          if (gesture.trackpad) moveBy(event.clientX - previous.x, event.clientY - previous.y, now - previous.at);
+          else moveTo(event.clientX, event.clientY);
+          return;
+        }
         if (gesture.trackpad) {
           // Tap, then touch again and drag: the left button stays down for the drag (as on a laptop trackpad).
           if (gesture.afterTap && !gesture.dragging) {
@@ -619,6 +642,8 @@
         if (stopped) return;
         releaseAll();
         stopped = true;
+        if (motionFrame != null) cancelAnimationFrame(motionFrame);
+        motionFrame = null;
         if (gamepadFrame) cancelAnimationFrame(gamepadFrame);
         gamepadFrame = null;
         if (pointerLocked()) document.exitPointerLock?.();
