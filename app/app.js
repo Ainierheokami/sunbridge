@@ -742,7 +742,6 @@
     }
     const stream = qs('#streamOverlay');
     if (!stream) return;
-    qsa('[data-stream-only]').forEach((node) => { node.hidden = !state.streamSession; });
     const drawerScale = qs('[data-drawer-scale]'); if (drawerScale && document.activeElement !== drawerScale) drawerScale.value = String(videoZoom());
     const drawerDpi = qs('[data-drawer-dpi]'); if (drawerDpi && document.activeElement !== drawerDpi) drawerDpi.value = String(touchDpi());
     const host = state.streamHost;
@@ -2365,7 +2364,6 @@
     closeAudioContext();
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
     state.streamSession = null; state.streamHost = null; state.streamApp = null;
-    qsa('[data-stream-only]').forEach((node) => { node.hidden = true; });
     const overlay = qs('#streamOverlay'); if (overlay) overlay.hidden = true;
     document.body.style.overflow = ''; document.body.classList.remove('is-streaming');
     renderAll();
@@ -2531,7 +2529,6 @@
     const appName = state.streamApp?.name || state.streamApp || t('common.desktop');
     if (state.streamSession) recordActivity('play', appName, 'activity.sessionEnded', { app: appName });
     state.streamSession = null; state.streamHost = null; state.streamApp = null;
-    qsa('[data-stream-only]').forEach((node) => { node.hidden = true; });
     const overlay = qs('#streamOverlay'); if (overlay) overlay.hidden = true;
     document.body.style.overflow = ''; document.body.classList.remove('is-streaming'); state.stopping = false; state.activeRemoteSession = null; renderAll(); renderResumeBar(); if (stopError) showToast(t('session.stopFailed'), errorMessage(stopError), 'warning'); else showToast(t('session.ended'), t('session.disconnected', { app: appName }), 'success');
   };
