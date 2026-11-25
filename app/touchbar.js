@@ -1,7 +1,7 @@
 // Touch controls for the stream page on phones and tablets, which have no hover (the fullscreen header only
 // shows on hover) and no Ctrl / Alt / Win / Esc keys:
 //   - a floating button, draggable to either edge, always on top of the stream (fullscreen included); a tap
-//     opens a menu: soft keyboard, PC keyboard, touch mode (direct / trackpad), pointer DPI, desktop / game controls, fullscreen;
+//     opens a menu: soft keyboard, the floating PC keyboard / gamepad / mouse (floating.js), touch mode (direct / trackpad), pointer DPI, desktop / game controls, fullscreen;
 //   - a key bar above the soft keyboard while it is open: Esc, Tab, latched Ctrl / Alt / Shift / Win, arrows
 //     and a few more, sent through the input controller (pressKey / toggleModifier).
 // Shown where the primary pointer is a finger, or once a finger touches the stream (a touchscreen laptop).
@@ -15,48 +15,6 @@
     ['Insert', 'Ins'], ['Delete', 'Del'], ['Home', 'Home'], ['End', 'End'], ['PageUp', 'PgUp'], ['PageDown', 'PgDn'],
     ['F1', 'F1'], ['F2', 'F2'], ['F3', 'F3'], ['F4', 'F4'], ['F5', 'F5'], ['F11', 'F11'], ['F12', 'F12'],
   ];
-  // The PC keyboard: a standard Windows layout measured in key units (u). The main block is 15u wide (each
-  // row adds up to that); the navigation cluster sits 0.5u to its right. Right-hand modifiers latch the same
-  // modifier as the left ones (the input controller latches by the left key).
-  const pcKey = (code, label, width = 1, extra = {}) => ({ code, label, width, ...extra });
-  const pcGap = (width) => ({ gap: true, width });
-  const pcMod = (code, label, width, latch) => pcKey(code, label, width, { latch, className: 'pc-key-mod' });
-  const pcChar = (code, label, shifted) => pcKey(code, label, 1, { shifted });
-  const PC_MAIN_ROWS = [
-    [pcKey('Escape', 'Esc'), pcGap(1), ...[1, 2, 3, 4].map((n) => pcKey('F' + n, 'F' + n)), pcGap(0.5),
-      ...[5, 6, 7, 8].map((n) => pcKey('F' + n, 'F' + n)), pcGap(0.5), ...[9, 10, 11, 12].map((n) => pcKey('F' + n, 'F' + n))],
-    [pcChar('Backquote', '`', '~'), ...'1234567890'.split('').map((digit, index) => pcChar('Digit' + digit, digit, '!@#$%^&*()'[index])),
-      pcChar('Minus', '-', '_'), pcChar('Equal', '=', '+'), pcKey('Backspace', 'Backspace', 2, { short: 'Bksp', className: 'pc-key-mod' })],
-    [pcKey('Tab', 'Tab', 1.5, { className: 'pc-key-mod' }), ...'QWERTYUIOP'.split('').map((letter) => pcKey('Key' + letter, letter)),
-      pcChar('BracketLeft', '[', '{'), pcChar('BracketRight', ']', '}'), pcKey('Backslash', '\\', 1.5, { shifted: '|' })],
-    [pcKey('CapsLock', 'Caps', 1.75, { className: 'pc-key-mod' }), ...'ASDFGHJKL'.split('').map((letter) => pcKey('Key' + letter, letter)),
-      pcChar('Semicolon', ';', ':'), pcChar('Quote', "'", '"'), pcKey('Enter', 'Enter', 2.25, { className: 'pc-key-mod' })],
-    [pcMod('ShiftLeft', 'Shift', 2.25, 'ShiftLeft'), ...'ZXCVBNM'.split('').map((letter) => pcKey('Key' + letter, letter)),
-      pcChar('Comma', ',', '<'), pcChar('Period', '.', '>'), pcChar('Slash', '/', '?'), pcMod('ShiftRight', 'Shift', 2.75, 'ShiftLeft')],
-    [pcMod('ControlLeft', 'Ctrl', 1.25, 'ControlLeft'), pcMod('MetaLeft', 'Win', 1.25, 'MetaLeft'), pcMod('AltLeft', 'Alt', 1.25, 'AltLeft'),
-      pcKey('Space', '', 6.25, { name: 'Space' }), pcMod('AltRight', 'Alt', 1.25, 'AltLeft'), pcMod('MetaRight', 'Win', 1.25, 'MetaLeft'),
-      pcKey('ContextMenu', '☰', 1.25, { name: 'Menu', className: 'pc-key-mod' }), pcMod('ControlRight', 'Ctrl', 1.25, 'ControlLeft')],
-  ];
-  // Navigation cluster: placed by grid area, so it can sit beside the main block or wrap under it (styles.css).
-  const PC_NAV_KEYS = [
-    ['PrintScreen', 'PrtSc', 'prt'], ['ScrollLock', 'ScrLk', 'scr'], ['Pause', 'Pause', 'pause'],
-    ['Insert', 'Ins', 'ins'], ['Home', 'Home', 'home'], ['PageUp', 'PgUp', 'pgup'],
-    ['Delete', 'Del', 'del'], ['End', 'End', 'end'], ['PageDown', 'PgDn', 'pgdn'],
-    ['ArrowUp', '↑', 'up', 'Up'], ['ArrowLeft', '←', 'left', 'Left'], ['ArrowDown', '↓', 'down', 'Down'], ['ArrowRight', '→', 'right', 'Right'],
-  ].map(([code, label, area, name]) => pcKey(code, label, 1, { area, name, className: 'pc-key-mod' }));
-  const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
-  const renderPcKey = (item, sticky) => {
-    if (item.gap) return '<span class="pc-key-gap" style="grid-column: span ' + Math.round(item.width * 4) + '" aria-hidden="true"></span>';
-    const place = item.area ? 'grid-area: ' + item.area : 'grid-column: span ' + Math.round(item.width * 4);
-    const label = item.shifted
-      ? '<span class="pc-key-shifted">' + escapeHtml(item.shifted) + '</span><span>' + escapeHtml(item.label) + '</span>'
-      : item.short ? '<span class="pc-key-long">' + escapeHtml(item.label) + '</span><span class="pc-key-short" aria-hidden="true">' + escapeHtml(item.short) + '</span>'
-      : escapeHtml(item.label);
-    const code = item.latch || item.code;
-    return '<button type="button" class="' + (item.className || '') + (item.shifted ? ' pc-key-dual' : '') + '" style="' + place + '"'
-      + ' data-pc-key="' + code + '"' + (item.name ? ' aria-label="' + item.name + '"' : '')
-      + (item.latch ? ' data-latch="" aria-pressed="' + sticky.has(code) + '"' : '') + '>' + label + '</button>';
-  };
   const POSITION_KEY = 'sunbridge.touchbar.position';
   const DRAG_SLOP_PX = 6;
   const EDGE_PX = 12;
@@ -78,24 +36,11 @@
     keybar.hidden = true;
     keybar.innerHTML = KEYS.map(([code, label, latch]) => `<button type="button" data-key="${code}"${latch ? ' data-latch=""' : ''}>${label}</button>`).join('')
       + '<button type="button" data-key-action="hide" class="touchbar-keys-hide"><span data-icon="keyboard" aria-hidden="true"></span></button>';
-    const pcKeyboard = document.createElement('section');
-    pcKeyboard.className = 'touchbar-pc-keyboard';
-    pcKeyboard.hidden = true;
-    pcKeyboard.setAttribute('aria-label', t('touch.pcKeyboard'));
-    overlay.append(root, keybar, pcKeyboard);
+    overlay.append(root, keybar);
     hydrateIcons(root);
     hydrateIcons(keybar);
     const fab = root.querySelector('.touchbar-fab');
     const menu = root.querySelector('.touchbar-menu');
-    const renderPcKeyboard = () => {
-      if (pcKeyboard.hidden) return;
-      const sticky = new Set(getState().sticky || []);
-      pcKeyboard.innerHTML = '<div class="touchbar-pc-keyboard-head"><strong>' + t('touch.pcKeyboard') + '</strong><button type="button" data-pc-action="close" aria-label="' + t('touch.closePcKeyboard') + '"><span data-icon="x" aria-hidden="true"></span></button></div>'
-        + '<div class="touchbar-pc-keyboard-keys"><div class="pc-keyboard-main">' + PC_MAIN_ROWS.flat().map((item) => renderPcKey(item, sticky)).join('') + '</div>'
-        + '<div class="pc-keyboard-nav">' + PC_NAV_KEYS.map((item) => renderPcKey(item, sticky)).join('') + '</div></div>';
-      hydrateIcons(pcKeyboard);
-    };
-    let pcKeyboardOpen = false;
     const listeners = [];
     const on = (target, type, handler, opts) => { target.addEventListener(type, handler, opts); listeners.push(() => target.removeEventListener(type, handler, opts)); };
 
@@ -162,7 +107,9 @@
       const state = getState();
       const desktop = state.controlMode === 'desktop';
       menu.innerHTML = item('keyboard', 'keyboard', t('touch.keyboard'))
-        + item('pc-keyboard', 'keyboard', pcKeyboardOpen ? t('touch.closePcKeyboard') : t('touch.pcKeyboard'))
+        + '<div class="touchbar-floating" role="group" aria-label="' + t('touch.floating') + '"><span>' + t('touch.floating') + '</span><div>'
+        + [['keyboard', 'keyboard', 'touch.pcKeyboard'], ['gamepad', 'gamepad', 'touch.gamepad'], ['mouse', 'mouse', 'touch.mouse']].map(([name, icon, label]) => '<button type="button" data-floating-toggle="' + name + '" aria-pressed="' + Boolean(floating?.isOpen(name)) + '"><span data-icon="' + icon + '" aria-hidden="true"></span><span>' + t(label) + '</span></button>').join('')
+        + '</div></div>'
         + (desktop ? `<div class="touchbar-segment" role="group" aria-label="${t('touch.mode')}"><span>${t('touch.mode')}</span><div>`
           + `<button type="button" data-touch-mode="direct" aria-pressed="${state.touchMode !== 'trackpad'}">${t('touch.direct')}</button>`
           + `<button type="button" data-touch-mode="trackpad" aria-pressed="${state.touchMode === 'trackpad'}">${t('touch.trackpad')}</button></div></div>` : '')
@@ -175,11 +122,21 @@
     const openMenu = () => { renderMenu(); menu.hidden = false; fab.setAttribute('aria-expanded', 'true'); };
     const closeMenu = () => { menu.hidden = true; fab.setAttribute('aria-expanded', 'false'); };
     const toggleMenu = () => { if (menu.hidden) openMenu(); else closeMenu(); };
-    const togglePcKeyboard = () => {
-      pcKeyboardOpen = !pcKeyboardOpen;
-      keyboardInput?.blur();
-      pcKeyboard.hidden = !pcKeyboardOpen;
-      renderPcKeyboard();
+    // The floating keyboard, gamepad and mouse (floating.js). Opening one puts the soft keyboard away.
+    const floating = window.SunbridgeFloating?.createFloatingControls({
+      overlay, t, hydrateIcons, getState,
+      pressKey: options.pressKey,
+      toggleModifier: options.toggleModifier,
+      gamepad: options.gamepad,
+      mouseMove: options.mouseMove,
+      mouseButton: options.mouseButton,
+      mouseScroll: options.mouseScroll,
+      onChange: () => { if (!menu.hidden) renderMenu(); options.onFloatingChange?.(); },
+    }) || null;
+    const togglePanel = (name) => {
+      if (!floating) return;
+      if (!floating.isOpen(name)) keyboardInput?.blur();
+      floating.toggle(name);
     };
     // Pointer taps toggle in endDrag; this is Enter / Space on the focused button.
     on(fab, 'click', (event) => { if (event.detail === 0) toggleMenu(); });
@@ -197,6 +154,8 @@
       }
     });
     on(menu, 'click', (event) => {
+      const panel = event.target.closest('[data-floating-toggle]')?.dataset.floatingToggle;
+      if (panel) { closeMenu(); togglePanel(panel); return; }
       const mode = event.target.closest('[data-touch-mode]')?.dataset.touchMode;
       if (mode) { options.setTouchMode(mode); renderMenu(); return; }
       const action = event.target.closest('[data-touch-action]')?.dataset.touchAction;
@@ -204,19 +163,8 @@
       closeMenu();
       // Synchronous in the tap: iOS only opens the keyboard for a focus() made during a user gesture.
       if (action === 'keyboard') options.showKeyboard();
-      else if (action === 'pc-keyboard') togglePcKeyboard();
       else if (action === 'control-mode') options.toggleControlMode();
       else if (action === 'fullscreen') void options.toggleFullscreen();
-    });
-    on(pcKeyboard, 'pointerdown', (event) => { event.preventDefault(); event.stopPropagation(); });
-    on(pcKeyboard, 'click', (event) => {
-      const close = event.target.closest('[data-pc-action="close"]');
-      if (close) { pcKeyboardOpen = false; pcKeyboard.hidden = true; return; }
-      const button = event.target.closest('[data-pc-key]');
-      if (!button) return;
-      if (button.dataset.latch !== undefined) options.toggleModifier(button.dataset.pcKey);
-      else options.pressKey(button.dataset.pcKey);
-      renderPcKeyboard();
     });
     // A touch anywhere else closes the menu.
     on(document, 'pointerdown', (event) => { if (!menu.hidden && !root.contains(event.target)) closeMenu(); }, true);
@@ -264,22 +212,23 @@
         fab.title = t('touch.menu');
         fab.setAttribute('aria-label', t('touch.menu'));
         if (!menu.hidden) renderMenu();
-        renderPcKeyboard();
       } else {
         closeMenu();
       }
       renderKeys();
+      floating?.render();
     }
     render();
 
     return {
       render,
-      togglePcKeyboard,
+      togglePanel,
+      isPanelOpen: (name) => Boolean(floating?.isOpen(name)),
       destroy() {
+        floating?.destroy();
         listeners.splice(0).forEach((off) => off());
         root.remove();
         keybar.remove();
-        pcKeyboard.remove();
       },
     };
   }

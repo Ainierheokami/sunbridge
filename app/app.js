@@ -1951,7 +1951,13 @@
       pressKey: (code) => state.inputController?.pressKey(code),
       toggleModifier: (code) => state.inputController?.toggleModifier(code),
       clearModifiers: () => state.inputController?.clearModifiers(),
+      gamepad: (pad) => state.inputController?.virtualGamepad(pad),
+      mouseMove: (dx, dy) => state.inputController?.mouseMove(dx, dy),
+      mouseButton: (button, down) => state.inputController?.mouseButton(button, down),
+      mouseScroll: (amount) => state.inputController?.mouseScroll(amount),
+      onFloatingChange: () => syncFloatingButtons(),
     }) || null;
+    syncFloatingButtons();
     queueStreamRender();
   };
 
@@ -2176,6 +2182,10 @@
   const setTouchDpi = (value) => {
     const dpi = Math.max(25, Math.min(300, Number(value) || 100));
     try { localStorage.setItem('sunbridge.setting.touch-dpi', String(dpi)); } catch { /* storage blocked */ }
+  };
+  // Quick settings: which floating controls (keyboard / gamepad / mouse) are open.
+  const syncFloatingButtons = () => {
+    qsa('[data-action="toggle-floating"]').forEach((button) => button.setAttribute('aria-pressed', String(Boolean(state.touchBar?.isPanelOpen?.(button.dataset.panel)))));
   };
   const videoZoom = () => {
     let saved = null;
@@ -2761,7 +2771,7 @@
     if (action === 'toggle-control-mode') toggleControlMode();
     if (action === 'toggle-fullscreen') void toggleFullscreen();
     if (action === 'toggle-follow-window') toggleFollowWindow();
-    if (action === 'toggle-pc-keyboard') state.touchBar?.togglePcKeyboard?.();
+    if (action === 'toggle-floating') state.touchBar?.togglePanel?.(actionTarget.dataset.panel);
     if (action === 'show-keyboard') showSoftKeyboard();
     if (action === 'send-clipboard') void state.clipboardSync?.sendNow();
     if (action === 'cancel-transfer') {

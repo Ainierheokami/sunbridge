@@ -101,6 +101,7 @@
     if (!canvas || typeof send !== 'function') throw new TypeError('createInputController needs a canvas and a send function');
     const pressedKeys = new Map(); // code -> vk
     const pressedButtons = new Set();
+    const panelButtons = new Set(); // held on the on-screen mouse: a finger lifted elsewhere doesn't release them
     const pads = new Map(); // gamepad.index -> { controllerNumber, lastKey }
     const listeners = [];
     let queue = [];
@@ -204,8 +205,9 @@
       held = null; // what it held is released below as key / button ups
       for (const [code, vk] of pressedKeys) queue.push({ kind: 'key', keyCode: vk, down: false, modifiers: 0, code });
       pressedKeys.clear();
-      for (const button of pressedButtons) queue.push({ kind: 'mouse-button', button, down: false });
+      for (const button of new Set([...pressedButtons, ...panelButtons])) queue.push({ kind: 'mouse-button', button, down: false });
       pressedButtons.clear();
+      panelButtons.clear();
       if (queue.length) flush();
     };
 
@@ -565,10 +567,20 @@
     }
 
     // ----- gamepads -----
+    // The on-screen gamepad (touchbar.js) is a controller of its own next to any real ones.
+    let virtualPad = null; // { controllerNumber, lastKey }
     const controllerMask = () => {
       let mask = 0;
       for (const pad of pads.values()) mask |= 1 << pad.controllerNumber;
+      if (virtualPad) mask |= 1 << virtualPad.controllerNumber;
       return mask;
+    };
+    const freeControllerNumber = () => {
+      const used = new Set([...pads.values()].map((item) => item.controllerNumber));
+      if (virtualPad) used.add(virtualPad.controllerNumber);
+      let controllerNumber = 0;
+      while (used.has(controllerNumber) && controllerNumber < 15) controllerNumber += 1;
+      return controllerNumber;
     };
     const pollGamepads = () => {
       gamepadFrame = null;
@@ -578,10 +590,7 @@
         if (!gamepad || !gamepad.connected) continue;
         let pad = pads.get(gamepad.index);
         if (!pad) {
-          const used = new Set([...pads.values()].map((item) => item.controllerNumber));
-          let controllerNumber = 0;
-          while (used.has(controllerNumber) && controllerNumber < 15) controllerNumber += 1;
-          pad = { controllerNumber, lastKey: '', arrived: false };
+          pad = { controllerNumber: freeControllerNumber(), lastKey: '', arrived: false };
           pads.set(gamepad.index, pad);
           stats.gamepads = pads.size;
           notify();
@@ -627,7 +636,43 @@
     });
     if (navigator.getGamepads && Array.from(navigator.getGamepads()).some(Boolean)) startGamepadPolling();
 
+    // State of the on-screen gamepad ({ buttons, leftTrigger, ..., rightStickY } in GameStream units), or null
+    // to unplug it. It plugs itself in on its first state.
+    const virtualGamepad = (input) => {
+      if (!active()) return;
+      if (!input) {
+        if (!virtualPad) return;
+        const { controllerNumber } = virtualPad;
+        virtualPad = null;
+        push({ kind: 'gamepad', controllerNumber, activeGamepadMask: controllerMask(), buttons: 0, leftTrigger: 0, rightTrigger: 0, leftStickX: 0, leftStickY: 0, rightStickX: 0, rightStickY: 0 });
+        if (navigator.vibrate) navigator.vibrate(0);
+        return;
+      }
+      if (!virtualPad) {
+        virtualPad = { controllerNumber: freeControllerNumber(), lastKey: '' };
+        push({ kind: 'gamepad-arrival', controllerNumber: virtualPad.controllerNumber, type: 1, capabilities: 0x01 | (navigator.vibrate ? 0x02 : 0), supportedButtonFlags: 0xf7ff });
+      }
+      const state = {
+        kind: 'gamepad',
+        controllerNumber: virtualPad.controllerNumber,
+        activeGamepadMask: controllerMask(),
+        buttons: input.buttons >>> 0,
+        leftTrigger: input.leftTrigger | 0,
+        rightTrigger: input.rightTrigger | 0,
+        leftStickX: input.leftStickX | 0,
+        leftStickY: input.leftStickY | 0,
+        rightStickX: input.rightStickX | 0,
+        rightStickY: input.rightStickY | 0,
+      };
+      const key = [state.buttons, state.leftTrigger, state.rightTrigger, state.leftStickX, state.leftStickY, state.rightStickX, state.rightStickY, state.activeGamepadMask].join(',');
+      if (key === virtualPad.lastKey) return;
+      virtualPad.lastKey = key;
+      push(state);
+    };
+
     const rumble = ({ controller, lowFreq, highFreq }) => {
+      // The on-screen gamepad rumbles the phone, where it can.
+      if (virtualPad?.controllerNumber === controller && navigator.vibrate) navigator.vibrate(lowFreq || highFreq ? 5000 : 0);
       const list = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
       for (const [index, pad] of pads) {
         if (pad.controllerNumber !== controller) continue;
@@ -645,6 +690,20 @@
       modeChanged() { if (desktopMode() && pointerLocked()) document.exitPointerLock?.(); },
       // Touch key bar: a key (KeyboardEvent.code) with the latched modifiers, and latching one.
       pressKey,
+      virtualGamepad,
+      // On-screen mouse: relative motion (CSS px, already scaled), buttons 1-5 held down / released, wheel notches.
+      mouseMove(dx, dy) {
+        if (!active() || (!dx && !dy)) return;
+        pendingDx += Math.round(dx);
+        pendingDy += Math.round(dy);
+        scheduleMotion();
+      },
+      mouseButton(button, down) {
+        if (!active() || button < 1 || button > 5 || panelButtons.has(button) === down) return;
+        if (down) panelButtons.add(button); else panelButtons.delete(button);
+        push({ kind: 'mouse-button', button, down });
+      },
+      mouseScroll(amount) { if (active() && amount) push({ kind: 'scroll', amount: Math.round(amount) }); },
       toggleModifier(code) {
         if (!MODIFIER_FLAG[code]) return;
         if (sticky.has(code)) sticky.delete(code); else sticky.add(code);

@@ -4161,7 +4161,7 @@ async function handleApi(request, response, pathname) {
 
 // Only the web client itself is served. Everything else in this directory (data with the pairing
 // key, password hashes and TLS keys, certs/, scripts, tests, backups, server sources) must never be readable.
-const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/files.js', '/touchbar.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/testbench.js', '/favicon.ico']);
+const STATIC_FILES = new Set(['/index.html', '/login.html', '/styles.css', '/app.js', '/bridge.js', '/media.js', '/input.js', '/i18n.js', '/login.js', '/audio-worklet.js', '/media-worker.js', '/clipboard.js', '/files.js', '/touchbar.js', '/floating.js', '/qr.js', '/security.js', '/theme.js', '/access.js', '/testbench.js', '/favicon.ico']);
 const isServableStatic = (requestedPath) => STATIC_FILES.has(requestedPath) || /^\/assets\/[\w.-]+\.(png|jpe?g|svg|webp|ico)$/i.test(requestedPath);
 
 function serveStatic(request, response, pathname) {
