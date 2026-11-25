@@ -182,7 +182,7 @@
 
     // Answer for a test WebRTC connection to the bridge's UDP port.
     async webrtcTest(sdp) {
-      return this.request('/api/bridge/webrtc-test', { method: 'POST', body: { sdp }, timeoutMs: 10000 });
+      return this.request('/api/bridge/webrtc-test', { method: 'POST', body: { sdp }, timeoutMs: 15000 });
     }
 
     async wake(hostOrInput, mac) {
