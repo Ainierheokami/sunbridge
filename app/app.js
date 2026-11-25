@@ -1671,7 +1671,7 @@
     }
     const mediaApi = window.SunbridgeMedia;
     const canvas = freshVideoCanvas();
-    setVideoZoom(videoZoom());
+    applyVideoZoom(videoZoom());
     // Video decoded and drawn in a worker that also owns the media socket (media-worker.js), unless the browser
     // can't: then here, on the main thread.
     const useWorker = Boolean(canvas && mediaApi?.createWorkerSocket && typeof window.Worker === 'function'
@@ -2168,7 +2168,7 @@
   };
   const touchDpi = () => {
     let saved = null;
-    try { saved = Number(localStorage.getItem('sunbridge.setting.touch-dpi')); } catch { /* storage blocked */ }
+    try { saved = Number(localStorage.getItem('sunbridge.setting.touch-dpi') ?? NaN); } catch { /* storage blocked */ }
     return Number.isFinite(saved) ? Math.max(25, Math.min(300, saved)) : 100;
   };
   const setTouchDpi = (value) => {
@@ -2177,13 +2177,14 @@
   };
   const videoZoom = () => {
     let saved = null;
-    try { saved = Number(localStorage.getItem('sunbridge.setting.video-zoom')); } catch { /* storage blocked */ }
+    try { saved = Number(localStorage.getItem('sunbridge.setting.stream-scale') ?? NaN); } catch { /* storage blocked */ }
     return Number.isFinite(saved) ? Math.max(50, Math.min(150, saved)) : 100;
   };
+  const applyVideoZoom = (zoom) => qs('#streamOverlay')?.style.setProperty('--stream-video-zoom', String(zoom / 100));
   const setVideoZoom = (value) => {
     const zoom = Math.max(50, Math.min(150, Number(value) || 100));
-    try { localStorage.setItem('sunbridge.setting.video-zoom', String(zoom)); } catch { /* storage blocked */ }
-    qs('#streamOverlay')?.style.setProperty('--stream-video-zoom', String(zoom / 100));
+    try { localStorage.setItem('sunbridge.setting.stream-scale', String(zoom)); } catch { /* storage blocked */ }
+    applyVideoZoom(zoom);
   };
   // Adaptive streams: follow the window, or keep the current resolution (a window being dragged around
   // would otherwise make the host switch modes again and again).
