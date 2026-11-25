@@ -630,6 +630,9 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 .drawer-section .drawer-setting:first-of-type { border-radius: var(--radius-md) var(--radius-md) 0 0; }
 .drawer-section .drawer-setting:last-child { border-bottom: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); }
 .drawer-setting select { min-width: 10rem; }
+.drawer-range { width: min(9rem, 42%); accent-color: var(--accent); }
+.drawer-action-button { min-height: 2rem; padding: 0 0.75rem; border: 0; border-radius: var(--radius-sm); color: var(--text); background: var(--surface-2); font: inherit; font-size: 0.8125rem; font-weight: 600; }
+.drawer-action-button:active { background: var(--surface-pressed); }
 .drawer-sharpness { padding-block: 0.625rem; }
 .drawer-sharpness > span { display: grid; gap: 0.125rem; }
 .drawer-sharpness small { color: var(--text-3); }

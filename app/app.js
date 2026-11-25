@@ -742,6 +742,9 @@
     }
     const stream = qs('#streamOverlay');
     if (!stream) return;
+    qsa('[data-stream-only]').forEach((node) => { node.hidden = !state.streamSession; });
+    const drawerScale = qs('[data-drawer-scale]'); if (drawerScale && document.activeElement !== drawerScale) drawerScale.value = String(videoZoom());
+    const drawerDpi = qs('[data-drawer-dpi]'); if (drawerDpi && document.activeElement !== drawerDpi) drawerDpi.value = String(touchDpi());
     const host = state.streamHost;
     const app = state.streamApp;
     const session = state.streamSession || {};
@@ -2185,23 +2188,33 @@
   };
   // Adaptive streams: follow the window, or keep the current resolution (a window being dragged around
   // would otherwise make the host switch modes again and again).
-  const followsWindow = () => state.settings.followWindow !== false;
+  const resolutionMode = () => ['auto', 'fixed', 'host'].includes(state.settings.resolutionMode)
+    ? state.settings.resolutionMode
+    : state.settings.followWindow === false ? 'fixed' : 'auto';
+  const followsWindow = () => resolutionMode() === 'auto';
   const renderResolutionButton = () => {
     const button = qs('#streamResolutionButton'); if (!button) return;
     button.hidden = !state.streamPlan?.adaptive;
     const session = state.streamSession;
     const size = session?.width ? session.width + '×' + session.height : '—';
-    const follow = followsWindow();
-    button.innerHTML = '<span data-icon="' + (follow ? 'expand' : 'lock') + '" aria-hidden="true"></span><span>' + esc(t(follow ? 'control.resolutionAuto' : 'control.resolutionFixed', { size })) + '</span>';
-    button.title = t(follow ? 'control.resolutionAutoHint' : 'control.resolutionFixedHint');
-    button.setAttribute('aria-pressed', String(follow));
+    const mode = resolutionMode();
+    const labels = { auto: 'control.resolutionAuto', fixed: 'control.resolutionFixed', host: 'control.resolutionHost' };
+    const hints = { auto: 'control.resolutionAutoHint', fixed: 'control.resolutionFixedHint', host: 'control.resolutionHostHint' };
+    const icons = { auto: 'expand', fixed: 'lock', host: 'server' };
+    button.innerHTML = '<span data-icon="' + icons[mode] + '" aria-hidden="true"></span><span>' + esc(t(labels[mode], { size })) + '</span>';
+    button.title = t(hints[mode], { size });
+    button.setAttribute('aria-pressed', String(mode === 'auto'));
+    button.dataset.resolutionMode = mode;
     hydrateIcons(button);
   };
   const toggleFollowWindow = () => {
-    state.settings.followWindow = !followsWindow();
+    const modes = ['auto', 'fixed', 'host'];
+    const mode = modes[(modes.indexOf(resolutionMode()) + 1) % modes.length];
+    state.settings.resolutionMode = mode;
+    state.settings.followWindow = mode === 'auto';
     saveSettings();
     renderResolutionButton();
-    showToast(t(followsWindow() ? 'control.resolutionAutoOn' : 'control.resolutionAutoOff'), t(followsWindow() ? 'control.resolutionAutoHint' : 'control.resolutionFixedHint'));
+    showToast(t({ auto: 'control.resolutionAutoOn', fixed: 'control.resolutionAutoOff', host: 'control.resolutionHostOn' }[mode]), t({ auto: 'control.resolutionAutoHint', fixed: 'control.resolutionFixedHint', host: 'control.resolutionHostHint' }[mode]));
     if (followsWindow()) void checkAdaptiveResize();
   };
   const toggleControlMode = () => {
@@ -2352,6 +2365,7 @@
     closeAudioContext();
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
     state.streamSession = null; state.streamHost = null; state.streamApp = null;
+    qsa('[data-stream-only]').forEach((node) => { node.hidden = true; });
     const overlay = qs('#streamOverlay'); if (overlay) overlay.hidden = true;
     document.body.style.overflow = ''; document.body.classList.remove('is-streaming');
     renderAll();
@@ -2517,6 +2531,7 @@
     const appName = state.streamApp?.name || state.streamApp || t('common.desktop');
     if (state.streamSession) recordActivity('play', appName, 'activity.sessionEnded', { app: appName });
     state.streamSession = null; state.streamHost = null; state.streamApp = null;
+    qsa('[data-stream-only]').forEach((node) => { node.hidden = true; });
     const overlay = qs('#streamOverlay'); if (overlay) overlay.hidden = true;
     document.body.style.overflow = ''; document.body.classList.remove('is-streaming'); state.stopping = false; state.activeRemoteSession = null; renderAll(); renderResumeBar(); if (stopError) showToast(t('session.stopFailed'), errorMessage(stopError), 'warning'); else showToast(t('session.ended'), t('session.disconnected', { app: appName }), 'success');
   };
@@ -2746,6 +2761,7 @@
     if (action === 'toggle-control-mode') toggleControlMode();
     if (action === 'toggle-fullscreen') void toggleFullscreen();
     if (action === 'toggle-follow-window') toggleFollowWindow();
+    if (action === 'toggle-pc-keyboard') state.touchBar?.togglePcKeyboard?.();
     if (action === 'show-keyboard') showSoftKeyboard();
     if (action === 'send-clipboard') void state.clipboardSync?.sendNow();
     if (action === 'cancel-transfer') {
@@ -2777,6 +2793,13 @@
   document.addEventListener('submit', (event) => { if (event.target.matches('#pairForm')) handlePairSubmit(event); if (event.target.matches('#hostForm')) void handleHostSave(event); });
   document.addEventListener('mousedown', (event) => { if (event.target.matches('#hostModal')) closeHostModal(); });
   document.addEventListener('click', (event) => { const toggle = event.target.closest('[data-toggle]'); if (toggle) toggleSetting(toggle); });
+  document.addEventListener('input', (event) => {
+    if (event.target.matches('[data-drawer-scale]')) {
+      setVideoZoom(event.target.value);
+      return;
+    }
+    if (event.target.matches('[data-drawer-dpi]')) setTouchDpi(event.target.value);
+  });
   document.addEventListener('click', (event) => { const answer = event.target.closest('[data-transfer-answer]'); if (answer) answerTransfer(answer.dataset.transferAnswer); });
   // Show the saved state of each switch (the markup only has the defaults).
   qsa('[data-toggle]').forEach((toggle) => {

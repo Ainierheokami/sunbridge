@@ -142,6 +142,12 @@
     const openMenu = () => { renderMenu(); menu.hidden = false; fab.setAttribute('aria-expanded', 'true'); };
     const closeMenu = () => { menu.hidden = true; fab.setAttribute('aria-expanded', 'false'); };
     const toggleMenu = () => { if (menu.hidden) openMenu(); else closeMenu(); };
+    const togglePcKeyboard = () => {
+      pcKeyboardOpen = !pcKeyboardOpen;
+      keyboardInput?.blur();
+      pcKeyboard.hidden = !pcKeyboardOpen;
+      renderPcKeyboard();
+    };
     // Pointer taps toggle in endDrag; this is Enter / Space on the focused button.
     on(fab, 'click', (event) => { if (event.detail === 0) toggleMenu(); });
     on(menu, 'pointerdown', (event) => event.stopPropagation());
@@ -165,12 +171,7 @@
       closeMenu();
       // Synchronous in the tap: iOS only opens the keyboard for a focus() made during a user gesture.
       if (action === 'keyboard') options.showKeyboard();
-      else if (action === 'pc-keyboard') {
-        pcKeyboardOpen = !pcKeyboardOpen;
-        keyboardInput?.blur();
-        pcKeyboard.hidden = !pcKeyboardOpen;
-        renderPcKeyboard();
-      }
+      else if (action === 'pc-keyboard') togglePcKeyboard();
       else if (action === 'control-mode') options.toggleControlMode();
       else if (action === 'fullscreen') void options.toggleFullscreen();
     });
@@ -240,6 +241,7 @@
 
     return {
       render,
+      togglePcKeyboard,
       destroy() {
         listeners.splice(0).forEach((off) => off());
         root.remove();
