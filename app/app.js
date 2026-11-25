@@ -1669,6 +1669,7 @@
     }
     const mediaApi = window.SunbridgeMedia;
     const canvas = freshVideoCanvas();
+    setVideoZoom(videoZoom());
     // Video decoded and drawn in a worker that also owns the media socket (media-worker.js), unless the browser
     // can't: then here, on the main thread.
     const useWorker = Boolean(canvas && mediaApi?.createWorkerSocket && typeof window.Worker === 'function'
@@ -1936,10 +1937,11 @@
       keyboardInput: qs('#streamKeyboardInput'),
       t,
       hydrateIcons,
-      getState: () => ({ controlMode: state.controlMode, touchMode: touchMode(), touchDpi: touchDpi(), fullscreen: Boolean(document.fullscreenElement), sticky: state.inputController?.stats.sticky || [] }),
+      getState: () => ({ controlMode: state.controlMode, touchMode: touchMode(), touchDpi: touchDpi(), videoZoom: videoZoom(), fullscreen: Boolean(document.fullscreenElement), sticky: state.inputController?.stats.sticky || [] }),
       showKeyboard: showSoftKeyboard,
       setTouchMode,
       setTouchDpi,
+      setVideoZoom,
       toggleControlMode,
       toggleFullscreen,
       pressKey: (code) => state.inputController?.pressKey(code),
@@ -2170,6 +2172,16 @@
   const setTouchDpi = (value) => {
     const dpi = Math.max(25, Math.min(300, Number(value) || 100));
     try { localStorage.setItem('sunbridge.setting.touch-dpi', String(dpi)); } catch { /* storage blocked */ }
+  };
+  const videoZoom = () => {
+    let saved = null;
+    try { saved = Number(localStorage.getItem('sunbridge.setting.video-zoom')); } catch { /* storage blocked */ }
+    return Number.isFinite(saved) ? Math.max(50, Math.min(150, saved)) : 100;
+  };
+  const setVideoZoom = (value) => {
+    const zoom = Math.max(50, Math.min(150, Number(value) || 100));
+    try { localStorage.setItem('sunbridge.setting.video-zoom', String(zoom)); } catch { /* storage blocked */ }
+    qs('#streamOverlay')?.style.setProperty('--stream-video-zoom', String(zoom / 100));
   };
   // Adaptive streams: follow the window, or keep the current resolution (a window being dragged around
   // would otherwise make the host switch modes again and again).

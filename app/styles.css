@@ -663,7 +663,7 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 .stream-end-button svg { width: 0.75rem; height: 0.75rem; }
 .footer-separator { width: 1px; height: 0.75rem; background: rgba(255, 255, 255, 0.16); }
 .stream-stage { position: relative; overflow: hidden; background: #000; touch-action: none; }
-.stream-video-canvas { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; background: #000; opacity: 0; transition: opacity 200ms ease; touch-action: none; cursor: crosshair; }
+.stream-video-canvas { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; background: #000; opacity: 0; transform: scale(var(--stream-video-zoom, 1)); transform-origin: center; transition: opacity 200ms ease, transform 120ms ease; touch-action: none; cursor: crosshair; }
 .stream-overlay[data-control-mode="desktop"] .stream-video-canvas { cursor: default; }
 .stream-overlay[data-video-state="playing"] .stream-video-canvas { opacity: 1; }
 /* The host draws its pointer into the video: hide this device's over the picture so there aren't two
