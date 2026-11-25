@@ -632,12 +632,14 @@ h1 em { color: var(--text-3); font-style: normal; font-weight: 600; }
 .drawer-section .drawer-setting:last-child { border-bottom: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); }
 .drawer-setting select { min-width: 10rem; }
 body:not(.is-streaming) [data-stream-only] { display: none; }
-.drawer-range { width: min(9rem, 42%); accent-color: var(--accent); }
+.drawer-range-field { display: flex; flex: none; align-items: center; gap: 0.5rem; }
+.drawer-range { width: 6rem; margin: 0; accent-color: var(--accent); }
+.drawer-range-field output { min-width: 2.75rem; color: var(--text-2); font-size: 0.8125rem; font-variant-numeric: tabular-nums; text-align: right; }
 .drawer-action-button { min-height: 2rem; padding: 0 0.75rem; border: 0; border-radius: var(--radius-sm); color: var(--text); background: var(--surface-2); font: inherit; font-size: 0.8125rem; font-weight: 600; }
 .drawer-action-button:active { background: var(--surface-pressed); }
-.drawer-sharpness { padding-block: 0.625rem; }
-.drawer-sharpness > span { display: grid; gap: 0.125rem; }
-.drawer-sharpness small { color: var(--text-3); }
+.drawer-sharpness, .drawer-stream-only { padding-block: 0.625rem; }
+.drawer-sharpness > span, .drawer-stream-only > span:first-child { display: grid; gap: 0.125rem; min-width: 0; }
+.drawer-sharpness small, .drawer-stream-only small { color: var(--text-3); font-size: 0.75rem; line-height: 1.35; }
 .drawer-sharpness .toggle { flex: none; }
 .drawer-footer { margin-top: auto; padding-top: 1.25rem; }
 
@@ -734,19 +736,34 @@ body.is-streaming .app-shell { display: none; }
 .touchbar-keys button[aria-pressed="true"] { color: #fff; background: #0a84ff; }
 .touchbar-keys .touchbar-keys-hide { display: inline-flex; align-items: center; justify-content: center; margin-left: auto; }
 .touchbar-keys svg { width: 1.125rem; height: 1.125rem; }
-.touchbar-pc-keyboard { position: fixed; right: max(0.5rem, env(safe-area-inset-right)); bottom: max(0.75rem, env(safe-area-inset-bottom)); left: max(0.5rem, env(safe-area-inset-left)); z-index: 22; display: grid; gap: 0.25rem; max-height: min(52vh, 27rem); overflow: auto; padding: 0.5rem; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 0.75rem; color: #f5f5f7; background: rgba(28, 28, 30, 0.96); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48); touch-action: manipulation; }
+.touchbar-pc-keyboard { --pc-key-height: clamp(1.75rem, 7vh, 2.5rem); position: fixed; right: max(0.5rem, env(safe-area-inset-right)); bottom: max(0.75rem, env(safe-area-inset-bottom)); left: max(0.5rem, env(safe-area-inset-left)); z-index: 22; display: grid; gap: 0.375rem; max-width: 64rem; max-height: min(60vh, 28rem); margin-inline: auto; overflow: auto; padding: 0.5rem 0.5rem 0.625rem; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 0.75rem; color: #f5f5f7; background: rgba(28, 28, 30, 0.96); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.48); touch-action: manipulation; }
 .touchbar-pc-keyboard[hidden] { display: none; }
-.touchbar-pc-keyboard-head { display: flex; align-items: center; justify-content: space-between; min-height: 2rem; padding: 0 0.25rem 0.125rem; color: #a1a1a6; font-size: 0.8125rem; }
+.touchbar-pc-keyboard-head { display: flex; align-items: center; justify-content: space-between; min-height: 2rem; padding: 0 0.25rem; color: #a1a1a6; font-size: 0.8125rem; }
 .touchbar-pc-keyboard-head button { display: inline-grid; place-items: center; width: 2rem; height: 2rem; padding: 0; border: 0; border-radius: 999px; color: #d0d0d5; background: transparent; }
 .touchbar-pc-keyboard-head button:active { background: rgba(255, 255, 255, 0.14); }
 .touchbar-pc-keyboard-head svg { width: 1rem; height: 1rem; }
-.touchbar-pc-keyboard-row { display: flex; gap: 0.25rem; min-width: max-content; }
-.touchbar-pc-keyboard-row button { flex: 1 0 2rem; min-width: 2rem; height: 2.25rem; padding: 0 0.25rem; border: 0; border-radius: 0.375rem; color: #f5f5f7; background: rgba(255, 255, 255, 0.12); font: inherit; font-size: 0.75rem; touch-action: manipulation; }
-.touchbar-pc-keyboard-row button:active, .touchbar-pc-keyboard-row button[aria-pressed="true"] { background: #0a84ff; }
-.touchbar-pc-keyboard-row .pc-key-wide { flex-grow: 1.8; }
-.touchbar-pc-keyboard-row .pc-key-xwide { flex-grow: 2.5; }
-.touchbar-pc-keyboard-row .pc-key-space { flex-grow: 5; }
-.touchbar-pc-keyboard-row .pc-key-escape { margin-right: 0.75rem; }
+/* Key widths in quarter units: the main block is 15u (60 columns), then a 0.5u gap and the 3u navigation
+   cluster. Keys are spaced by their margins, so every row lines up exactly whatever the widths. */
+.touchbar-pc-keyboard-keys { display: grid; grid-template-columns: minmax(0, 15fr) minmax(0, 0.5fr) minmax(0, 3fr); }
+.pc-keyboard-main { grid-column: 1; display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); grid-auto-rows: var(--pc-key-height); row-gap: 0.25rem; }
+.pc-keyboard-nav { grid-column: 3; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(6, var(--pc-key-height)); row-gap: 0.25rem; grid-template-areas: "prt scr pause" "ins home pgup" "del end pgdn" ". . ." ". up ." "left down right"; }
+.touchbar-pc-keyboard-keys button { display: flex; min-width: 0; margin: 0 0.125rem; padding: 0 0.25rem; overflow: hidden; align-items: center; justify-content: center; border: 0; border-radius: 0.375rem; color: #f5f5f7; background: rgba(255, 255, 255, 0.14); box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.28); font: inherit; font-size: 0.8125rem; line-height: 1; white-space: nowrap; touch-action: manipulation; }
+.touchbar-pc-keyboard-keys .pc-key-mod { color: #d0d0d5; background: rgba(255, 255, 255, 0.08); font-size: 0.75rem; }
+.touchbar-pc-keyboard-keys .pc-key-dual { flex-direction: column; gap: 0.125rem; }
+.touchbar-pc-keyboard-keys .pc-key-shifted { color: #8e8e93; font-size: 0.6875rem; }
+.touchbar-pc-keyboard-keys button:active, .touchbar-pc-keyboard-keys button[aria-pressed="true"] { color: #fff; background: #0a84ff; }
+.touchbar-pc-keyboard-keys button[aria-pressed="true"] .pc-key-shifted { color: rgba(255, 255, 255, 0.75); }
+.touchbar-pc-keyboard-keys .pc-key-short { display: none; }
+/* Narrow screens: the navigation cluster wraps under the main block, in two rows. */
+@media (max-width: 40rem) {
+  .touchbar-pc-keyboard-keys { grid-template-columns: minmax(0, 1fr); row-gap: 0.5rem; }
+  .pc-keyboard-nav { grid-column: 1; grid-template-columns: repeat(9, minmax(0, 1fr)); grid-template-rows: repeat(2, var(--pc-key-height)); grid-template-areas: "ins home pgup . prt scr . up ." "del end pgdn . pause . left down right"; }
+  .touchbar-pc-keyboard-keys button { margin: 0 0.0625rem; padding: 0; font-size: 0.75rem; }
+  .touchbar-pc-keyboard-keys .pc-key-mod { font-size: 0.6875rem; }
+  .touchbar-pc-keyboard-keys .pc-key-shifted { font-size: 0.625rem; }
+  .touchbar-pc-keyboard-keys .pc-key-long { display: none; }
+  .touchbar-pc-keyboard-keys .pc-key-short { display: inline; }
+}
 /* No hover on touch screens: the fullscreen header can't be revealed and would take blind taps (the touch menu has fullscreen). */
 @media (hover: none) and (pointer: coarse) {
   .stream-overlay:fullscreen .stream-header { pointer-events: none; }

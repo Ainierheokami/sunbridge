@@ -15,16 +15,48 @@
     ['Insert', 'Ins'], ['Delete', 'Del'], ['Home', 'Home'], ['End', 'End'], ['PageUp', 'PgUp'], ['PageDown', 'PgDn'],
     ['F1', 'F1'], ['F2', 'F2'], ['F3', 'F3'], ['F4', 'F4'], ['F5', 'F5'], ['F11', 'F11'], ['F12', 'F12'],
   ];
-  const key = (code, label, className = '', latch = false) => ({ code, label, className, latch });
-  const PC_KEY_ROWS = [
-    [key('Escape', 'Esc', 'pc-key-escape'), key('F1', 'F1'), key('F2', 'F2'), key('F3', 'F3'), key('F4', 'F4'), key('F5', 'F5'), key('F6', 'F6'), key('F7', 'F7'), key('F8', 'F8'), key('F9', 'F9'), key('F10', 'F10'), key('F11', 'F11'), key('F12', 'F12')],
-    [key('Backquote', String.fromCharCode(96)), key('Digit1', '1'), key('Digit2', '2'), key('Digit3', '3'), key('Digit4', '4'), key('Digit5', '5'), key('Digit6', '6'), key('Digit7', '7'), key('Digit8', '8'), key('Digit9', '9'), key('Digit0', '0'), key('Minus', '-'), key('Equal', '='), key('Backspace', 'Backspace', 'pc-key-wide')],
-    [key('Tab', 'Tab', 'pc-key-wide'), ...'QWERTYUIOP'.split('').map((letter) => key('Key' + letter, letter)), key('BracketLeft', '['), key('BracketRight', ']'), key('Backslash', String.fromCharCode(92))],
-    [key('CapsLock', 'Caps', 'pc-key-wide'), ...'ASDFGHJKL'.split('').map((letter) => key('Key' + letter, letter)), key('Semicolon', ';'), key('Quote', String.fromCharCode(39)), key('Enter', 'Enter', 'pc-key-wide')],
-    [key('ShiftLeft', 'Shift', 'pc-key-xwide', true), ...'ZXCVBNM'.split('').map((letter) => key('Key' + letter, letter)), key('Comma', ','), key('Period', '.'), key('Slash', '/'), key('ShiftRight', 'Shift', 'pc-key-xwide', true)],
-    [key('ControlLeft', 'Ctrl', 'pc-key-modifier', true), key('MetaLeft', 'Win', 'pc-key-modifier', true), key('AltLeft', 'Alt', 'pc-key-modifier', true), key('Space', 'Space', 'pc-key-space'), key('AltRight', 'Alt', 'pc-key-modifier', true), key('ControlRight', 'Ctrl', 'pc-key-modifier', true), key('ArrowLeft', '←'), key('ArrowDown', '↓'), key('ArrowUp', '↑'), key('ArrowRight', '→')],
-    [key('Insert', 'Ins'), key('Delete', 'Del'), key('Home', 'Home'), key('End', 'End'), key('PageUp', 'PgUp'), key('PageDown', 'PgDn')],
+  // The PC keyboard: a standard Windows layout measured in key units (u). The main block is 15u wide (each
+  // row adds up to that); the navigation cluster sits 0.5u to its right. Right-hand modifiers latch the same
+  // modifier as the left ones (the input controller latches by the left key).
+  const pcKey = (code, label, width = 1, extra = {}) => ({ code, label, width, ...extra });
+  const pcGap = (width) => ({ gap: true, width });
+  const pcMod = (code, label, width, latch) => pcKey(code, label, width, { latch, className: 'pc-key-mod' });
+  const pcChar = (code, label, shifted) => pcKey(code, label, 1, { shifted });
+  const PC_MAIN_ROWS = [
+    [pcKey('Escape', 'Esc'), pcGap(1), ...[1, 2, 3, 4].map((n) => pcKey('F' + n, 'F' + n)), pcGap(0.5),
+      ...[5, 6, 7, 8].map((n) => pcKey('F' + n, 'F' + n)), pcGap(0.5), ...[9, 10, 11, 12].map((n) => pcKey('F' + n, 'F' + n))],
+    [pcChar('Backquote', '`', '~'), ...'1234567890'.split('').map((digit, index) => pcChar('Digit' + digit, digit, '!@#$%^&*()'[index])),
+      pcChar('Minus', '-', '_'), pcChar('Equal', '=', '+'), pcKey('Backspace', 'Backspace', 2, { short: 'Bksp', className: 'pc-key-mod' })],
+    [pcKey('Tab', 'Tab', 1.5, { className: 'pc-key-mod' }), ...'QWERTYUIOP'.split('').map((letter) => pcKey('Key' + letter, letter)),
+      pcChar('BracketLeft', '[', '{'), pcChar('BracketRight', ']', '}'), pcKey('Backslash', '\\', 1.5, { shifted: '|' })],
+    [pcKey('CapsLock', 'Caps', 1.75, { className: 'pc-key-mod' }), ...'ASDFGHJKL'.split('').map((letter) => pcKey('Key' + letter, letter)),
+      pcChar('Semicolon', ';', ':'), pcChar('Quote', "'", '"'), pcKey('Enter', 'Enter', 2.25, { className: 'pc-key-mod' })],
+    [pcMod('ShiftLeft', 'Shift', 2.25, 'ShiftLeft'), ...'ZXCVBNM'.split('').map((letter) => pcKey('Key' + letter, letter)),
+      pcChar('Comma', ',', '<'), pcChar('Period', '.', '>'), pcChar('Slash', '/', '?'), pcMod('ShiftRight', 'Shift', 2.75, 'ShiftLeft')],
+    [pcMod('ControlLeft', 'Ctrl', 1.25, 'ControlLeft'), pcMod('MetaLeft', 'Win', 1.25, 'MetaLeft'), pcMod('AltLeft', 'Alt', 1.25, 'AltLeft'),
+      pcKey('Space', '', 6.25, { name: 'Space' }), pcMod('AltRight', 'Alt', 1.25, 'AltLeft'), pcMod('MetaRight', 'Win', 1.25, 'MetaLeft'),
+      pcKey('ContextMenu', '☰', 1.25, { name: 'Menu', className: 'pc-key-mod' }), pcMod('ControlRight', 'Ctrl', 1.25, 'ControlLeft')],
   ];
+  // Navigation cluster: placed by grid area, so it can sit beside the main block or wrap under it (styles.css).
+  const PC_NAV_KEYS = [
+    ['PrintScreen', 'PrtSc', 'prt'], ['ScrollLock', 'ScrLk', 'scr'], ['Pause', 'Pause', 'pause'],
+    ['Insert', 'Ins', 'ins'], ['Home', 'Home', 'home'], ['PageUp', 'PgUp', 'pgup'],
+    ['Delete', 'Del', 'del'], ['End', 'End', 'end'], ['PageDown', 'PgDn', 'pgdn'],
+    ['ArrowUp', '↑', 'up', 'Up'], ['ArrowLeft', '←', 'left', 'Left'], ['ArrowDown', '↓', 'down', 'Down'], ['ArrowRight', '→', 'right', 'Right'],
+  ].map(([code, label, area, name]) => pcKey(code, label, 1, { area, name, className: 'pc-key-mod' }));
+  const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+  const renderPcKey = (item, sticky) => {
+    if (item.gap) return '<span class="pc-key-gap" style="grid-column: span ' + Math.round(item.width * 4) + '" aria-hidden="true"></span>';
+    const place = item.area ? 'grid-area: ' + item.area : 'grid-column: span ' + Math.round(item.width * 4);
+    const label = item.shifted
+      ? '<span class="pc-key-shifted">' + escapeHtml(item.shifted) + '</span><span>' + escapeHtml(item.label) + '</span>'
+      : item.short ? '<span class="pc-key-long">' + escapeHtml(item.label) + '</span><span class="pc-key-short" aria-hidden="true">' + escapeHtml(item.short) + '</span>'
+      : escapeHtml(item.label);
+    const code = item.latch || item.code;
+    return '<button type="button" class="' + (item.className || '') + (item.shifted ? ' pc-key-dual' : '') + '" style="' + place + '"'
+      + ' data-pc-key="' + code + '"' + (item.name ? ' aria-label="' + item.name + '"' : '')
+      + (item.latch ? ' data-latch="" aria-pressed="' + sticky.has(code) + '"' : '') + '>' + label + '</button>';
+  };
   const POSITION_KEY = 'sunbridge.touchbar.position';
   const DRAG_SLOP_PX = 6;
   const EDGE_PX = 12;
@@ -59,7 +91,8 @@
       if (pcKeyboard.hidden) return;
       const sticky = new Set(getState().sticky || []);
       pcKeyboard.innerHTML = '<div class="touchbar-pc-keyboard-head"><strong>' + t('touch.pcKeyboard') + '</strong><button type="button" data-pc-action="close" aria-label="' + t('touch.closePcKeyboard') + '"><span data-icon="x" aria-hidden="true"></span></button></div>'
-        + PC_KEY_ROWS.map((row) => '<div class="touchbar-pc-keyboard-row">' + row.map((item) => '<button type="button" class="' + item.className + '" data-pc-key="' + item.code + '"' + (item.latch ? ' data-latch="" aria-pressed="' + sticky.has(item.code) + '"' : '') + '>' + item.label + '</button>').join('') + '</div>').join('');
+        + '<div class="touchbar-pc-keyboard-keys"><div class="pc-keyboard-main">' + PC_MAIN_ROWS.flat().map((item) => renderPcKey(item, sticky)).join('') + '</div>'
+        + '<div class="pc-keyboard-nav">' + PC_NAV_KEYS.map((item) => renderPcKey(item, sticky)).join('') + '</div></div>';
       hydrateIcons(pcKeyboard);
     };
     let pcKeyboardOpen = false;

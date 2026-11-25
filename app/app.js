@@ -744,6 +744,8 @@
     if (!stream) return;
     const drawerScale = qs('[data-drawer-scale]'); if (drawerScale && document.activeElement !== drawerScale) drawerScale.value = String(videoZoom());
     const drawerDpi = qs('[data-drawer-dpi]'); if (drawerDpi && document.activeElement !== drawerDpi) drawerDpi.value = String(touchDpi());
+    const drawerScaleValue = qs('[data-drawer-scale-value]'); if (drawerScaleValue) drawerScaleValue.textContent = `${videoZoom()}%`;
+    const drawerDpiValue = qs('[data-drawer-dpi-value]'); if (drawerDpiValue) drawerDpiValue.textContent = `${touchDpi()}%`;
     const host = state.streamHost;
     const app = state.streamApp;
     const session = state.streamSession || {};
@@ -2794,9 +2796,13 @@
   document.addEventListener('input', (event) => {
     if (event.target.matches('[data-drawer-scale]')) {
       setVideoZoom(event.target.value);
+      const output = qs('[data-drawer-scale-value]'); if (output) output.textContent = `${videoZoom()}%`;
       return;
     }
-    if (event.target.matches('[data-drawer-dpi]')) setTouchDpi(event.target.value);
+    if (event.target.matches('[data-drawer-dpi]')) {
+      setTouchDpi(event.target.value);
+      const output = qs('[data-drawer-dpi-value]'); if (output) output.textContent = `${touchDpi()}%`;
+    }
   });
   document.addEventListener('click', (event) => { const answer = event.target.closest('[data-transfer-answer]'); if (answer) answerTransfer(answer.dataset.transferAnswer); });
   // Show the saved state of each switch (the markup only has the defaults).
