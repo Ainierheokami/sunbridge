@@ -23,7 +23,7 @@ import { nodeRuntimeStatus } from './runtime.mjs';
 import {
   loadConfig as loadNetConfig, saveConfig as saveNetConfig, validateConfig, environmentEntrypoint, makeAddressMatcher, isLoopbackAddress,
   hostAllowed, scanCertificates, pickCertificate, storeCertificate, deleteCertificate, nginxSnippet,
-  parseHost, validateWebrtc, validateIdle, DEFAULT_IDLE, DEFAULT_PORT as DEFAULT_ENTRY_PORT,
+  parseHost, validateWebrtc, validateIdle, DEFAULT_IDLE, DEFAULT_WEBRTC_FEC_PERCENT, DEFAULT_PORT as DEFAULT_ENTRY_PORT,
 } from './netconfig.mjs';
 import tls from 'node:tls';
 // The browser's media code (RTP / FEC / frame assembly) also runs here: the bridge assembles video frames itself.
@@ -97,6 +97,7 @@ const KEYFRAME_GRACE_MAX_DELAY_MS = 1500;
 const ABR_REMOTE_START_KBPS = 8000;
 const MEDIA_STATS_INTERVAL_MS = 1000;
 const MEDIA_GATEWAY_BATCH_BYTES = 256 * 1024;
+const RTC_DISCONNECTED_GRACE_MS = 12000;
 // Automatic reconnect to the host (network blip, host Wi-Fi roaming, sleep): RTSP/UDP/control are rebuilt via
 // Sunshine /resume, so the app on the host keeps running and browsers stay attached to the same session.
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
@@ -2058,7 +2059,7 @@ class MediaGatewayClient {
       return;
     }
     const target = webrtcTarget(settings, this.hostHeader);
-    const rtc = { pc: null, video: null, audio: null, ready: false, videoSequence: 0, lastAudio: null, disconnectedTimer: null, fecPercent: settings.fecPercent || 0 };
+    const rtc = { pc: null, video: null, audio: null, ready: false, videoSequence: 0, lastAudio: null, disconnectedTimer: null, fecPercent: settings.fecPercent ?? DEFAULT_WEBRTC_FEC_PERCENT };
     this.rtc = rtc;
     this.rtcStatus = { state: 'connecting', reason: null, port: target.port, publicHost: target.host, fecPercent: rtc.fecPercent };
     try {
@@ -2080,8 +2081,9 @@ class MediaGatewayClient {
           if (this.rtc !== rtc) return;
           clearTimeout(rtc.disconnectedTimer);
           if (state === 'failed' || state === 'closed') this.stopRtc(state);
-          // ICE may recover from "disconnected" (a Wi-Fi blip); media falls back after a few seconds.
-          else if (state === 'disconnected') rtc.disconnectedTimer = setTimeout(() => { if (this.rtc === rtc) this.stopRtc('disconnected'); }, 3000);
+          // ICE may recover after a mobile network handoff. Keep the peer alive long
+          // enough for the browser to rebind its UDP socket before falling back.
+          else if (state === 'disconnected') rtc.disconnectedTimer = setTimeout(() => { if (this.rtc === rtc) this.stopRtc('disconnected'); }, RTC_DISCONNECTED_GRACE_MS);
         },
       });
       if (this.rtc !== rtc || this.closed) { try { answer.pc.close(); } catch { /* closed */ } return; }
@@ -2207,7 +2209,7 @@ function checkIdleSession() {
 setInterval(checkIdleSession, IDLE_CHECK_MS).unref();
 
 function webrtcSettings() {
-  return netConfig.webrtc || { enabled: true, port: null, publicAddress: null, fecPercent: 0 };
+  return netConfig.webrtc || { enabled: true, port: null, publicAddress: null, fecPercent: DEFAULT_WEBRTC_FEC_PERCENT };
 }
 
 function webrtcTarget(settings, hostHeader) {

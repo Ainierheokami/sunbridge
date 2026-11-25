@@ -1088,7 +1088,7 @@
       await new Promise((resolve) => {
         if (pc.iceGatheringState === 'complete') { resolve(); return; }
         pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') resolve(); };
-        window.setTimeout(resolve, 1000);
+        window.setTimeout(resolve, 2500);
       });
       let answer;
       try { answer = await bridge.webrtcTest(pc.localDescription.sdp); } catch (error) {
@@ -1100,7 +1100,7 @@
       await new Promise((resolve, reject) => {
         if (channel.readyState === 'open') { resolve(); return; }
         channel.onopen = resolve;
-        window.setTimeout(() => reject(new Error('timeout')), 8000);
+        window.setTimeout(() => reject(new Error('timeout')), 10000);
       });
       const connectMs = Math.round(performance.now() - started);
       const rtts = [];

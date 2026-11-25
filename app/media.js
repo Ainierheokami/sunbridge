@@ -1775,6 +1775,9 @@
       },
       close(code = 1000, reason = '') {
         if (socket.readyState >= 2) return;
+        socketClosed = true;
+        clearTimeout(rtcRestartTimer);
+        rtcRestartTimer = null;
         socket.readyState = 2;
         worker.postMessage({ type: 'close', code, reason });
         terminateTimer = setTimeout(terminate, 2000);
@@ -1782,6 +1785,9 @@
     };
     const closed = (event) => {
       if (socket.readyState === 3) return;
+      socketClosed = true;
+      clearTimeout(rtcRestartTimer);
+      rtcRestartTimer = null;
       socket.readyState = 3;
       stopRtc('closed', false);
       socket.onclose?.(event);
@@ -1790,24 +1796,43 @@
 
     // WebRTC is negotiated here, where RTCPeerConnection exists; the DataChannels go to the worker in the task
     // that creates them (Chrome allows the transfer only then), so media never touches the main thread.
-    const RTC_CONNECT_TIMEOUT_MS = 8000;
+    const RTC_CONNECT_TIMEOUT_MS = 10000;
+    const RTC_RECONNECT_DELAYS_MS = [1000, 2500, 5000, 10000];
+    const RTC_DISCONNECTED_GRACE_MS = 12000;
     let rtc = null;
+    let rtcStartInFlight = false;
+    let rtcRestartTimer = null;
+    let rtcReconnectAttempt = 0;
+    let socketClosed = false;
     const sendJson = (value) => { if (socket.readyState === 1) worker.postMessage({ type: 'send', data: JSON.stringify(value) }); };
     const transport = (state, reason = null) => callbacks.onTransport?.({ state, reason });
+    const scheduleRtcRestart = (reason) => {
+      if (!webrtc || socketClosed || socket.readyState !== 1 || rtcRestartTimer || rtcStartInFlight) return;
+      const delay = RTC_RECONNECT_DELAYS_MS[Math.min(rtcReconnectAttempt, RTC_RECONNECT_DELAYS_MS.length - 1)];
+      rtcReconnectAttempt += 1;
+      transport('connecting', reason);
+      rtcRestartTimer = setTimeout(() => {
+        rtcRestartTimer = null;
+        if (!socketClosed && socket.readyState === 1 && !rtc) void startRtc();
+      }, delay);
+    };
     function stopRtc(reason, tellBridge = true) {
       if (!rtc) return;
       const current = rtc;
       rtc = null;
       clearTimeout(current.timer);
+      clearTimeout(current.disconnectTimer);
       try { current.pc.close(); } catch { /* closed */ }
       if (tellBridge) sendJson({ type: 'webrtc-close', reason });
       transport('websocket', reason);
+      if (!['closed', 'unsupported', 'unavailable'].includes(reason)) scheduleRtcRestart(reason);
     }
     async function startRtc() {
-      if (!webrtc || rtc || typeof RTCPeerConnection !== 'function') {
+      if (!webrtc || rtc || rtcStartInFlight || typeof RTCPeerConnection !== 'function') {
         if (webrtc && typeof RTCPeerConnection !== 'function') transport('websocket', 'unsupported');
         return;
       }
+      rtcStartInFlight = true;
       let pc;
       try {
         pc = new RTCPeerConnection({ iceServers: [] });
@@ -1817,21 +1842,42 @@
         const audioChannel = pc.createDataChannel('audio', { ordered: false, maxPacketLifeTime: 80 });
         worker.postMessage({ type: 'rtc-channels', video: videoChannel, audio: audioChannel }, [videoChannel, audioChannel]);
       } catch {
+        rtcStartInFlight = false;
         try { pc?.close(); } catch { /* closed */ }
         transport('websocket', 'unsupported');
         return;
       }
-      const current = { pc, timer: null };
+      const current = { pc, timer: null, disconnectTimer: null };
       rtc = current;
+      rtcStartInFlight = false;
+      const monitorState = () => {
+        if (rtc !== current) return;
+        const ice = pc.iceConnectionState;
+        const connection = pc.connectionState;
+        if (ice === 'connected' || ice === 'completed' || connection === 'connected') {
+          clearTimeout(current.disconnectTimer);
+          current.disconnectTimer = null;
+          return;
+        }
+        if (ice === 'failed' || connection === 'failed' || connection === 'closed') {
+          stopRtc(ice === 'failed' ? 'failed' : connection);
+          return;
+        }
+        if (ice === 'disconnected' || connection === 'disconnected') {
+          clearTimeout(current.disconnectTimer);
+          current.disconnectTimer = setTimeout(() => { if (rtc === current) stopRtc('disconnected'); }, RTC_DISCONNECTED_GRACE_MS);
+        }
+      };
       current.timer = setTimeout(() => { if (rtc === current) stopRtc('timeout'); }, RTC_CONNECT_TIMEOUT_MS);
-      pc.onconnectionstatechange = () => { if (rtc === current && pc.connectionState === 'failed') stopRtc('failed'); };
+      pc.onconnectionstatechange = monitorState;
+      pc.oniceconnectionstatechange = monitorState;
       transport('connecting');
       try {
         await pc.setLocalDescription(await pc.createOffer());
         await new Promise((resolve) => {
           if (pc.iceGatheringState === 'complete') { resolve(); return; }
           pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') resolve(); };
-          setTimeout(resolve, 1000);
+          setTimeout(resolve, 2500);
         });
         if (rtc === current) sendJson({ type: 'webrtc-offer', sdp: pc.localDescription.sdp });
       } catch {
@@ -1849,16 +1895,32 @@
         current.pc.setRemoteDescription({ type: 'answer', sdp: message.sdp }).catch(() => { if (rtc === current) stopRtc('answer-rejected'); });
       } else if (message.type === 'webrtc-active' && rtc) {
         clearTimeout(rtc.timer);
+        clearTimeout(rtc.disconnectTimer);
+        rtcReconnectAttempt = 0;
+        clearTimeout(rtcRestartTimer);
+        rtcRestartTimer = null;
         transport('webrtc');
       } else if (message.type === 'webrtc-unavailable' || message.type === 'webrtc-closed') {
-        if (rtc) stopRtc(message.reason || 'closed', false);
-        else transport('websocket', message.reason || 'closed');
+        const reason = message.reason || 'closed';
+        if (rtc) {
+          if (message.type === 'webrtc-unavailable') {
+            const current = rtc;
+            rtc = null;
+            clearTimeout(current.timer);
+            clearTimeout(current.disconnectTimer);
+            try { current.pc.close(); } catch { /* closed */ }
+            transport('websocket', reason);
+          } else stopRtc(reason, false);
+        } else if (message.type === 'webrtc-closed') {
+          transport('websocket', reason);
+          scheduleRtcRestart(reason);
+        } else transport('websocket', reason);
       }
     };
     worker.onmessage = (event) => {
       const message = event.data || {};
       switch (message.type) {
-        case 'socket-open': socket.readyState = 1; socket.protocol = message.protocol || ''; socket.onopen?.({}); break;
+        case 'socket-open': socketClosed = false; socket.readyState = 1; socket.protocol = message.protocol || ''; socket.onopen?.({}); break;
         case 'socket-text':
           if (message.data.includes('"media-ready"') || message.data.includes('"webrtc-')) rtcMessage(message.data);
           socket.onmessage?.({ data: message.data });

@@ -10,7 +10,7 @@
 //     SCTP packet (RTC_FRAGMENT_BYTES + a 16-byte header, see RTC_FRAGMENT_HEADER_BYTES), so a lost packet costs
 //     one fragment instead of 60 KB, grouped into FEC blocks of at most RTC_BLOCK_FRAGMENTS like Sunshine's.
 //     Optional parity fragments per block (Reed-Solomon, as Sunshine's FEC) let the browser rebuild a block from
-//     any as many of its fragments as it has data fragments; the setting is fecPercent, 0 = off;
+//     any as many of its fragments as it has data fragments; the setting is fecPercent;
 //   - audio: unordered, retransmitted for at most AUDIO_PACKET_LIFETIME_MS (later it is useless); each message
 //     carries the packet and the one before it, so a lost message is covered by the next one.
 // The WebSocket stays: it carries signalling, input and stats, and media again whenever WebRTC is unavailable.
@@ -38,13 +38,13 @@ export const RTC_FRAGMENT_BYTES = 1120;
 // u32 frame sequence, u32 envelope length, u16 first data fragment of the block, u16 data fragments in the block,
 // u16 parity fragments in the block, u16 index in the block (data first, then parity).
 export const RTC_FRAGMENT_HEADER_BYTES = 16;
-// Data fragments per FEC block. Encoding costs (parity fragments per block) table lookups per byte on the main
-// thread: 24 keeps 20 Mbps at 20 % FEC around 3 % of a core (64 took 15 %, and a keyframe blocked for 50 ms).
-export const RTC_BLOCK_FRAGMENTS = 24;
+// Smaller blocks recover short mobile loss bursts with less wasted data when a block
+// cannot be rebuilt. The table lookups remain cheap at the default parity budget.
+export const RTC_BLOCK_FRAGMENTS = 16;
 export const RTC_FEC_MAX_PERCENT = 50;
 export const VIDEO_MAX_RETRANSMITS = 3;
 export const AUDIO_PACKET_LIFETIME_MS = 80;
-const GATHER_TIMEOUT_MS = 1500;
+const GATHER_TIMEOUT_MS = 5000;
 const MAX_MESSAGE_BYTES = 256 * 1024;
 
 // Native builds of node-datachannel present in node_modules (one per platform: linux-x64-gnu, win32-x64-msvc...).
