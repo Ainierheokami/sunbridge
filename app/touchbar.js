@@ -12,7 +12,7 @@
     ['Escape', 'Esc'], ['Tab', 'Tab'],
     ['ControlLeft', 'Ctrl', true], ['AltLeft', 'Alt', true], ['ShiftLeft', 'Shift', true], ['MetaLeft', 'Win', true],
     ['ArrowLeft', '←'], ['ArrowUp', '↑'], ['ArrowDown', '↓'], ['ArrowRight', '→'],
-    ['Home', 'Home'], ['End', 'End'], ['PageUp', 'PgUp'], ['PageDown', 'PgDn'], ['Delete', 'Del'],
+    ['Insert', 'Ins'], ['Delete', 'Del'], ['Home', 'Home'], ['End', 'End'], ['PageUp', 'PgUp'], ['PageDown', 'PgDn'],
     ['F1', 'F1'], ['F2', 'F2'], ['F3', 'F3'], ['F4', 'F4'], ['F5', 'F5'], ['F11', 'F11'], ['F12', 'F12'],
   ];
   const POSITION_KEY = 'sunbridge.touchbar.position';

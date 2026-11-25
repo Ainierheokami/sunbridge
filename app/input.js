@@ -50,6 +50,11 @@
     return (event.shiftKey ? MODIFIER.SHIFT : 0) | (event.ctrlKey ? MODIFIER.CTRL : 0) | (event.altKey ? MODIFIER.ALT : 0) | (event.metaKey ? MODIFIER.META : 0);
   }
 
+  function isPasteShortcut(code, modifiers) {
+    if (code === 'Insert') return modifiers === MODIFIER.SHIFT;
+    return code === 'KeyV' && Boolean(modifiers & (MODIFIER.CTRL | MODIFIER.META)) && !(modifiers & MODIFIER.ALT);
+  }
+
   function axis(value) {
     const v = Number(value) || 0;
     if (Math.abs(v) < STICK_DEADZONE) return 0;
@@ -86,7 +91,7 @@
   //     devices keep the canvas, where a focused field would bring up the on-screen keyboard;
   //   - text (the soft keyboard's textarea is focused): this device's input method composes and the committed
   //     text is sent as Unicode; only keys that don't type (Enter, arrows, shortcuts) go as raw keys.
-  // beforePaste(): called on Ctrl/Cmd+V; while the promise it returns is pending, the keystroke is held back so
+  // beforePaste(): called on paste shortcuts; while the promise it returns is pending, the keystroke is held back so
   // the host pastes this device's clipboard (clipboard sync) rather than its own old content. Resolving false
   // drops it (large content waiting for the user's go-ahead).
   // getTouchMode(): how touches drive the host's mouse in desktop mode - 'direct' (the cursor goes where the
@@ -160,9 +165,8 @@
       });
     };
 
-    // A promise resolving false drops the held V presses (the paste waits for the user: see beforePaste);
-    // every other key held meanwhile, Ctrl's release included, still goes out.
-    const holdUntil = (promise, timeoutMs = 3000) => {
+    // A promise resolving false drops the held paste key. Other keys, including modifier releases, still go out.
+    const holdUntil = (promise, pasteKey, timeoutMs = 3000) => {
       held = held || [];
       let timer = null;
       const release = (value) => {
@@ -170,7 +174,7 @@
         if (!held) return;
         let events = held;
         held = null;
-        if (value === false) events = events.filter((event) => !(event.kind === 'key' && event.keyCode === VK.KeyV));
+        if (value === false) events = events.filter((event) => !(event.kind === 'key' && event.keyCode === pasteKey));
         events.forEach(push);
       };
       timer = setTimeout(release, timeoutMs);
@@ -233,21 +237,22 @@
       } else if (event.target === keySink ? !sinkUsable() : isEditable(event.target) || sinkUsable()) {
         focusKeys();
       }
-      // Ctrl/Cmd+V: let the browser's paste event through (it carries this device's clipboard) and hold the
+      // Let the browser's paste event through (it carries this device's clipboard) and hold the
       // keystroke until clipboard sync has put that content on the host.
-      if (beforePaste && event.code === 'KeyV' && (event.ctrlKey || event.metaKey) && !event.altKey && !event.repeat && event.target !== textInput) {
+      const modifiers = modifiersOf(event);
+      if (beforePaste && isPasteShortcut(event.code, modifiers) && !event.repeat && (event.target !== textInput || event.code === 'Insert')) {
         const pending = beforePaste();
-        if (pending) holdUntil(pending);
+        if (pending) holdUntil(pending, vk);
         else event.preventDefault();
       } else {
         event.preventDefault();
       }
       if (event.repeat && pressedKeys.has(event.code)) {
-        push({ kind: 'key', keyCode: vk, down: true, modifiers: modifiersOf(event) });
+        push({ kind: 'key', keyCode: vk, down: true, modifiers });
         return;
       }
       pressedKeys.set(event.code, vk);
-      push({ kind: 'key', keyCode: vk, down: true, modifiers: modifiersOf(event) });
+      push({ kind: 'key', keyCode: vk, down: true, modifiers });
     }, true);
     on(window, 'keyup', (event) => {
       if (!active()) return;
@@ -498,10 +503,19 @@
       if (!vk || !active()) return false;
       const mods = [...sticky];
       const flags = mods.reduce((value, mod) => value | (MODIFIER_FLAG[mod] || 0), 0);
-      mods.forEach((mod) => push({ kind: 'key', keyCode: VK[mod], down: true, modifiers: flags }));
-      push({ kind: 'key', keyCode: vk, down: true, modifiers: flags });
-      push({ kind: 'key', keyCode: vk, down: false, modifiers: flags });
-      mods.reverse().forEach((mod) => push({ kind: 'key', keyCode: VK[mod], down: false, modifiers: 0 }));
+      const sendChord = () => {
+        if (!active()) return;
+        mods.forEach((mod) => push({ kind: 'key', keyCode: VK[mod], down: true, modifiers: flags }));
+        push({ kind: 'key', keyCode: vk, down: true, modifiers: flags });
+        push({ kind: 'key', keyCode: vk, down: false, modifiers: flags });
+        mods.reverse().forEach((mod) => push({ kind: 'key', keyCode: VK[mod], down: false, modifiers: 0 }));
+      };
+      const pending = isPasteShortcut(code, flags) ? beforePaste?.({ fromKeybar: true }) : null;
+      if (pending) {
+        void pending.then((sent) => { if (sent !== false) sendChord(); }, () => {});
+      } else {
+        sendChord();
+      }
       if (sticky.size) { sticky.clear(); stickyChanged(); }
       return true;
     };

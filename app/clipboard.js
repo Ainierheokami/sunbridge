@@ -388,11 +388,12 @@
       await writeLocal(content);
     }
 
-    // Ctrl/Cmd+V (from the input controller, before the keystroke goes out): resolves once this device's
+    // Paste shortcut (from the input controller, before the keystroke goes out): resolves once this device's
     // clipboard is on the host. The paste event that follows the keydown carries it; a browser that sends no
     // paste event here falls back to reading the clipboard (the keypress allows that).
-    function beforePaste() {
+    function beforePaste({ fromKeybar = false } = {}) {
       if (!active()) return null;
+      if (fromKeybar) return sendLocal(true);
       if (pasteWaiter) pasteWaiter.resolve();
       return new Promise((resolve) => {
         // resolve(false): the content needs the user's go-ahead first, so the held Ctrl+V is dropped (it would

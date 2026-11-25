@@ -1926,7 +1926,7 @@
         textInput: qs('#streamKeyboardInput'),
         keySink: qs('#streamKeySink'),
         blockLocalIme: () => localStorage.getItem('sunbridge.setting.block-local-ime') !== 'false',
-        beforePaste: () => state.clipboardSync?.beforePaste() ?? null,
+        beforePaste: (options) => state.clipboardSync?.beforePaste(options) ?? null,
       });
     }
     state.touchBar?.destroy();
