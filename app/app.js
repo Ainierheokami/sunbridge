@@ -82,6 +82,9 @@
     bridgePollTimer: null,
     bridgePollBusy: false,
     bridgePollGeneration: 0,
+    displayScale: { supported: [100, 125, 150, 175, 200, 225, 250, 300, 350], current: 100, displayName: null, deviceId: null },
+    displayScaleTimer: null,
+    displayScaleRequest: null,
   };
 
   // Keep demo history isolated from real Sunshine activity so a live client never renders stale demo events.
@@ -742,9 +745,9 @@
     }
     const stream = qs('#streamOverlay');
     if (!stream) return;
-    const drawerScale = qs('[data-drawer-scale]'); if (drawerScale && document.activeElement !== drawerScale) drawerScale.value = String(videoZoom());
+    const drawerScale = qs('[data-drawer-scale]'); if (drawerScale && document.activeElement !== drawerScale) drawerScale.value = String(nearestDisplayScale(videoZoom()));
     const drawerDpi = qs('[data-drawer-dpi]'); if (drawerDpi && document.activeElement !== drawerDpi) drawerDpi.value = String(touchDpi());
-    const drawerScaleValue = qs('[data-drawer-scale-value]'); if (drawerScaleValue) drawerScaleValue.textContent = `${videoZoom()}%`;
+    const drawerScaleValue = qs('[data-drawer-scale-value]'); if (drawerScaleValue) drawerScaleValue.textContent = `${nearestDisplayScale(videoZoom())}%`;
     const drawerDpiValue = qs('[data-drawer-dpi-value]'); if (drawerDpiValue) drawerDpiValue.textContent = `${touchDpi()}%`;
     const host = state.streamHost;
     const app = state.streamApp;
@@ -1673,7 +1676,6 @@
     }
     const mediaApi = window.SunbridgeMedia;
     const canvas = freshVideoCanvas();
-    applyVideoZoom(videoZoom());
     // Video decoded and drawn in a worker that also owns the media socket (media-worker.js), unless the browser
     // can't: then here, on the main thread.
     const useWorker = Boolean(canvas && mediaApi?.createWorkerSocket && typeof window.Worker === 'function'
@@ -2187,16 +2189,71 @@
   const syncFloatingButtons = () => {
     qsa('[data-action="toggle-floating"]').forEach((button) => button.setAttribute('aria-pressed', String(Boolean(state.touchBar?.isPanelOpen?.(button.dataset.panel)))));
   };
-  const videoZoom = () => {
+  const savedDisplayScale = () => {
     let saved = null;
     try { saved = Number(localStorage.getItem('sunbridge.setting.stream-scale') ?? NaN); } catch { /* storage blocked */ }
-    return Number.isFinite(saved) ? Math.max(50, Math.min(150, saved)) : 100;
+    return Number.isFinite(saved) ? Math.max(100, Math.min(350, saved)) : null;
   };
-  const applyVideoZoom = (zoom) => qs('#streamOverlay')?.style.setProperty('--stream-video-zoom', String(zoom / 100));
+  const videoZoom = () => savedDisplayScale() ?? state.displayScale.current ?? 100;
+  const nearestDisplayScale = (value) => {
+    const values = state.displayScale.supported?.length ? state.displayScale.supported : [100, 125, 150, 175, 200, 225, 250, 300, 350];
+    return values.reduce((best, item) => Math.abs(item - value) < Math.abs(best - value) ? item : best, values[0]);
+  };
+  const updateDisplayScaleControl = () => {
+    const control = qs('[data-drawer-scale]');
+    if (control) {
+      const values = state.displayScale.supported?.length ? state.displayScale.supported : [100, 125, 150, 175, 200, 225, 250, 300, 350];
+      control.min = String(values[0]);
+      control.max = String(values[values.length - 1]);
+      control.step = '1';
+      control.value = String(nearestDisplayScale(videoZoom()));
+    }
+    const value = qs('[data-drawer-scale-value]');
+    if (value) value.textContent = `${nearestDisplayScale(videoZoom())}%`;
+  };
+  const queueDisplayScale = (value) => {
+    const scale = nearestDisplayScale(Number(value) || 100);
+    try { localStorage.setItem('sunbridge.setting.stream-scale', String(scale)); } catch { /* storage blocked */ }
+    state.displayScale.current = scale;
+    updateDisplayScaleControl();
+    if (!state.streamHost || bridge.isDemo) return;
+    window.clearTimeout(state.displayScaleTimer);
+    state.displayScaleTimer = window.setTimeout(() => {
+      const generation = (state.displayScaleGeneration || 0) + 1;
+      state.displayScaleGeneration = generation;
+      state.displayScaleRequest = bridge.setDisplayScale(state.streamHost, scale, state.displayScale)
+        .then((result) => {
+          if (generation !== state.displayScaleGeneration) return;
+          const applied = Number(result.result?.current_scale_percent);
+          if (Number.isInteger(applied)) state.displayScale.current = applied;
+          updateDisplayScaleControl();
+        })
+        .catch((error) => {
+          if (generation === state.displayScaleGeneration) showToast(t('drawer.streamScale'), errorMessage(error), 'warning');
+        });
+    }, 350);
+  };
+  const syncDisplayScale = async () => {
+    if (!state.streamHost) return;
+    try {
+      const response = await bridge.displayScaleOptions(state.streamHost, state.displayScale);
+      const options = response.options || {};
+      const supported = (Array.isArray(options.supported_scale_percents) ? options.supported_scale_percents : [])
+        .map(Number).filter((value) => Number.isInteger(value) && value >= 100 && value <= 350).sort((a, b) => a - b);
+      if (supported.length) state.displayScale.supported = [...new Set(supported)];
+      state.displayScale.displayName = options.display_name || state.displayScale.displayName || null;
+      state.displayScale.deviceId = options.device_id || state.displayScale.deviceId || null;
+      const current = Number(options.current_scale_percent);
+      const saved = savedDisplayScale();
+      state.displayScale.current = Number.isInteger(current) ? current : state.displayScale.current;
+      updateDisplayScaleControl();
+      if (saved != null && Number.isInteger(current) && nearestDisplayScale(saved) !== current) queueDisplayScale(saved);
+    } catch {
+      updateDisplayScaleControl();
+    }
+  };
   const setVideoZoom = (value) => {
-    const zoom = Math.max(50, Math.min(150, Number(value) || 100));
-    try { localStorage.setItem('sunbridge.setting.stream-scale', String(zoom)); } catch { /* storage blocked */ }
-    applyVideoZoom(zoom);
+    queueDisplayScale(value);
   };
   // Adaptive streams: follow the window, or keep the current resolution (a window being dragged around
   // would otherwise make the host switch modes again and again).
@@ -2347,6 +2404,7 @@
       const fresh = await bridge.launch({ hostId: host.id, address: host.address, hostName: host.name, appId: app.id, appName: app.name, width: plan.width, height: plan.height, fps: plan.fps, bitrateMode: plan.bitrateMode, videoCodecs: await preferredCodecs(plan), codecProbe: state.codecSupport?.[state.codecProbeKey], codecChoice: state.settings.codec || 'auto' });
       state.streamSession = fresh;
       startSessionEvents();
+      void syncDisplayScale();
       startMediaGateway(fresh);
     } catch {
       scheduleGatewayRetry();
@@ -2482,6 +2540,7 @@
     applyControlModeUi();
     renderResumeBar();
     renderStream('started'); startSessionEvents(); startSessionPolling();
+    void syncDisplayScale();
     startMediaGateway(session);
     startResizeWatcher();
   };
@@ -2510,6 +2569,7 @@
       state.streamSession = session;
       state.activeRemoteSession = null;
       renderResolutionButton();
+      void syncDisplayScale();
       startMediaGateway(session);
       startResizeWatcher();
       renderStream('started');
@@ -2806,7 +2866,7 @@
   document.addEventListener('input', (event) => {
     if (event.target.matches('[data-drawer-scale]')) {
       setVideoZoom(event.target.value);
-      const output = qs('[data-drawer-scale-value]'); if (output) output.textContent = `${videoZoom()}%`;
+      const output = qs('[data-drawer-scale-value]'); if (output) output.textContent = `${nearestDisplayScale(videoZoom())}%`;
       return;
     }
     if (event.target.matches('[data-drawer-dpi]')) {

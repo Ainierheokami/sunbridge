@@ -180,6 +180,18 @@
       return this.request('/api/bridge/diagnose', { method: 'POST', body: input, timeoutMs: 30000 });
     }
 
+    async displayScaleOptions(hostOrInput, display = {}) {
+      const input = { ...this.inputForHost(hostOrInput), displayName: display.displayName || null, deviceId: display.deviceId || null };
+      if (this.demo) return { options: { success: true, display_name: 'Demo display', current_scale_percent: 100, recommended_scale_percent: 125, supported_scale_percents: [100, 125, 150, 175, 200, 225, 250, 300], scale_set_supported: true } };
+      return this.request('/api/bridge/display-scale/options', { method: 'POST', body: input, timeoutMs: 20000 });
+    }
+
+    async setDisplayScale(hostOrInput, scalePercent, display = {}) {
+      const input = { ...this.inputForHost(hostOrInput), scalePercent: Number(scalePercent), displayName: display.displayName || null, deviceId: display.deviceId || null };
+      if (this.demo) return { result: { success: true, current_scale_percent: input.scalePercent, effective_immediately: true, restart_required: false } };
+      return this.request('/api/bridge/display-scale', { method: 'POST', body: input, timeoutMs: 20000 });
+    }
+
     // Answer for a test WebRTC connection to the bridge's UDP port.
     async webrtcTest(sdp) {
       return this.request('/api/bridge/webrtc-test', { method: 'POST', body: { sdp }, timeoutMs: 15000 });

@@ -115,7 +115,7 @@
           + `<button type="button" data-touch-mode="trackpad" aria-pressed="${state.touchMode === 'trackpad'}">${t('touch.trackpad')}</button></div></div>` : '')
         + item('control-mode', desktop ? 'gamepad' : 'mouse', t(desktop ? 'touch.toGame' : 'touch.toDesktop'))
         + (document.fullscreenEnabled ? item('fullscreen', state.fullscreen ? 'compress' : 'expand', t(state.fullscreen ? 'control.exitFullscreen' : 'touch.fullscreen')) : '')
-        + `<label class="touchbar-dpi"><span>${t('touch.scale')} <strong>${state.videoZoom}%</strong></span><input type="range" min="50" max="150" step="5" value="${state.videoZoom}" data-touch-scale aria-label="${t('touch.scale')}"></label>`
+        + `<label class="touchbar-dpi"><span>${t('touch.scale')} <strong>${state.videoZoom}%</strong></span><input type="range" min="100" max="350" step="25" value="${state.videoZoom}" data-touch-scale aria-label="${t('touch.scale')}"></label>`
         + (desktop ? `<label class="touchbar-dpi"><span>${t('touch.dpi')} <strong>${state.touchDpi}%</strong></span><input type="range" min="25" max="300" step="5" value="${state.touchDpi}" data-touch-dpi aria-label="${t('touch.dpi')}"></label><p class="touchbar-hint">${t(state.touchMode === 'trackpad' ? 'touch.trackpadHint' : 'touch.directHint')}</p>` : '');
       hydrateIcons(menu);
     };

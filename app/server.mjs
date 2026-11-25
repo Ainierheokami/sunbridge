@@ -980,6 +980,26 @@ function assertSunshineSuccess(result, operation) {
   return result;
 }
 
+function parseSunshineJson(result, operation) {
+  try {
+    const payload = JSON.parse(String(result.body || '{}'));
+    if (payload && Number(payload.status_code) >= 400) {
+      throw bridgeError(`Sunshine ${operation} 返回协议状态 ${payload.status_code}`, 'SUNSHINE_REQUEST_FAILED', { statusCode: Number(payload.status_code) });
+    }
+    return payload;
+  } catch (error) {
+    if (error?.errorCode) throw error;
+    throw bridgeError(`Sunshine ${operation} 返回了无效 JSON`, 'SUNSHINE_REQUEST_FAILED');
+  }
+}
+
+function displayScaleRequestBody(body = {}) {
+  const payload = { scale_percent: Number(body.scalePercent) };
+  if (body.displayName) payload.display_name = String(body.displayName);
+  if (body.deviceId) payload.device_id = String(body.deviceId);
+  return payload;
+}
+
 async function requestServerInfo(host, options = {}) {
   const pairedWithCertificate = Boolean(host.paired && host.serverCertBase64);
   // A paired host is pinned to its saved TLS certificate. Never downgrade a
@@ -1830,7 +1850,8 @@ class MediaGatewayClient {
   constructor(socket, session) {
     this.socket = socket;
     this.session = session;
-    this.buffer = Buffer.alloc(0);
+    this.inputChunks = [];
+    this.inputBytes = 0;
     this.closed = false;
     this.closeNotified = false;
     this.corked = false;
@@ -1852,6 +1873,7 @@ class MediaGatewayClient {
     this.mediaAudioCount = 0;
     this.mediaFlushScheduled = false;
     socket.setNoDelay(true);
+    socket.setKeepAlive(true, 10000);
     socket.on('data', (chunk) => this.handleData(chunk));
     socket.once('close', () => this.cleanup());
     socket.once('error', () => this.cleanup());
@@ -1942,27 +1964,39 @@ class MediaGatewayClient {
 
   handleData(chunk) {
     if (this.closed) return;
-    this.buffer = Buffer.concat([this.buffer, toBuffer(chunk)]);
-    if (this.buffer.length > MEDIA_GATEWAY_MAX_FRAME_BYTES * 2) {
+    const incoming = toBuffer(chunk);
+    if (incoming.length) {
+      this.inputChunks.push(incoming);
+      this.inputBytes += incoming.length;
+    }
+    if (this.inputBytes > MEDIA_GATEWAY_MAX_FRAME_BYTES * 2) {
       this.close(1009, 'frame too large');
       return;
     }
-    while (this.buffer.length >= 2) {
-      const first = this.buffer[0];
-      const second = this.buffer[1];
+    if (!this.inputBytes) return;
+    // TCP may split one WebSocket frame across many data events. Concatenate
+    // once per event instead of repeatedly copying the partial frame while
+    // parsing it.
+    const buffer = Buffer.concat(this.inputChunks, this.inputBytes);
+    this.inputChunks = [];
+    this.inputBytes = 0;
+    let cursor = 0;
+    while (buffer.length - cursor >= 2) {
+      const first = buffer[cursor];
+      const second = buffer[cursor + 1];
       const fin = Boolean(first & 0x80);
       const opcode = first & 0x0f;
       const masked = Boolean(second & 0x80);
-      let offset = 2;
+      let offset = cursor + 2;
       let length = second & 0x7f;
       if (length === 126) {
-        if (this.buffer.length < offset + 2) return;
-        length = this.buffer.readUInt16BE(offset);
+        if (buffer.length < offset + 2) break;
+        length = buffer.readUInt16BE(offset);
         offset += 2;
       } else if (length === 127) {
-        if (this.buffer.length < offset + 8) return;
-        const high = this.buffer.readUInt32BE(offset);
-        const low = this.buffer.readUInt32BE(offset + 4);
+        if (buffer.length < offset + 8) break;
+        const high = buffer.readUInt32BE(offset);
+        const low = buffer.readUInt32BE(offset + 4);
         if (high > 0 || low > MEDIA_GATEWAY_MAX_FRAME_BYTES) {
           this.close(1009, 'frame too large');
           return;
@@ -1971,11 +2005,12 @@ class MediaGatewayClient {
         offset += 8;
       }
       const maskLength = masked ? 4 : 0;
-      if (this.buffer.length < offset + maskLength + length) return;
-      const mask = masked ? this.buffer.subarray(offset, offset + 4) : null;
-      offset += maskLength;
-      const payload = Buffer.from(this.buffer.subarray(offset, offset + length));
-      this.buffer = this.buffer.subarray(offset + length);
+      const payloadStart = offset + maskLength;
+      const payloadEnd = payloadStart + length;
+      if (buffer.length < payloadEnd) break;
+      const mask = masked ? buffer.subarray(offset, offset + 4) : null;
+      const payload = Buffer.from(buffer.subarray(payloadStart, payloadEnd));
+      cursor = payloadEnd;
       if (!fin) {
         this.close(1003, 'fragmented frames are not supported');
         return;
@@ -1988,6 +2023,11 @@ class MediaGatewayClient {
       if (opcode === 0x9) this.send(0xA, payload);
       else if (opcode === 0x1) this.handleText(payload.toString('utf8'));
       else if (opcode !== 0xA && opcode !== 0x2) this.close(1003, 'unsupported frame');
+    }
+    if (cursor < buffer.length) {
+      const remaining = buffer.subarray(cursor);
+      this.inputChunks = [remaining];
+      this.inputBytes = remaining.length;
     }
   }
 
@@ -3992,6 +4032,40 @@ async function handleApi(request, response, pathname) {
   }
   if (pathname === '/api/bridge/diagnose' && request.method === 'POST') {
     jsonResponse(response, 200, { ok: true, ...(await diagnoseHost(findHost(body))) });
+    return;
+  }
+  if (pathname === '/api/bridge/display-scale/options' && request.method === 'POST') {
+    const host = findHost(body);
+    const params = {};
+    if (body.displayName) params.display_name = String(body.displayName);
+    if (body.deviceId) params.device_id = String(body.deviceId);
+    const result = await requestHost(host, '/display-scale-options', params, {
+      secure: true,
+      headers: { Accept: 'application/json' },
+      timeout: 15000,
+    });
+    const options = parseSunshineJson(result, '/display-scale-options');
+    jsonResponse(response, 200, { ok: true, options });
+    return;
+  }
+  if (pathname === '/api/bridge/display-scale' && request.method === 'POST') {
+    const scalePercent = Number(body.scalePercent);
+    if (!Number.isInteger(scalePercent) || scalePercent < 100 || scalePercent > 350) {
+      throw bridgeError('Windows 显示缩放必须是 100 到 350 的整数百分比', 'DISPLAY_SCALE_INVALID', { statusCode: 400 });
+    }
+    const host = findHost(body);
+    const result = await requestHost(host, '/display-scale', {}, {
+      secure: true,
+      method: 'POST',
+      body: Buffer.from(JSON.stringify(displayScaleRequestBody(body)), 'utf8'),
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+    const applied = parseSunshineJson(result, '/display-scale');
+    if (applied.success !== true || Number(applied.status_code || 200) >= 400) {
+      throw bridgeError(applied.status_message || 'Windows 显示缩放未能应用', 'DISPLAY_SCALE_FAILED', { statusCode: Number(applied.status_code || 502) });
+    }
+    jsonResponse(response, 200, { ok: true, result: applied });
     return;
   }
   // A real WebRTC connection from this browser to the bridge's UDP port: answers the offer, echoes whatever
