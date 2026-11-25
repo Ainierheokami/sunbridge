@@ -1778,6 +1778,8 @@
         socketClosed = true;
         clearTimeout(rtcRestartTimer);
         rtcRestartTimer = null;
+        window.removeEventListener('online', onNetworkResume);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
         socket.readyState = 2;
         worker.postMessage({ type: 'close', code, reason });
         terminateTimer = setTimeout(terminate, 2000);
@@ -1788,6 +1790,8 @@
       socketClosed = true;
       clearTimeout(rtcRestartTimer);
       rtcRestartTimer = null;
+      window.removeEventListener('online', onNetworkResume);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       socket.readyState = 3;
       stopRtc('closed', false);
       socket.onclose?.(event);
@@ -1806,6 +1810,14 @@
     let socketClosed = false;
     const sendJson = (value) => { if (socket.readyState === 1) worker.postMessage({ type: 'send', data: JSON.stringify(value) }); };
     const transport = (state, reason = null) => callbacks.onTransport?.({ state, reason });
+    const onNetworkResume = () => {
+      if (!rtc || socketClosed) return;
+      const state = rtc.pc.iceConnectionState;
+      if (state === 'disconnected' || state === 'failed') stopRtc('network-change');
+    };
+    const onVisibilityChange = () => { if (document.visibilityState === 'visible') onNetworkResume(); };
+    window.addEventListener('online', onNetworkResume);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     const scheduleRtcRestart = (reason) => {
       if (!webrtc || socketClosed || socket.readyState !== 1 || rtcRestartTimer || rtcStartInFlight) return;
       const delay = RTC_RECONNECT_DELAYS_MS[Math.min(rtcReconnectAttempt, RTC_RECONNECT_DELAYS_MS.length - 1)];
