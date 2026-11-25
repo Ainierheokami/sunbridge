@@ -1923,6 +1923,7 @@
         onQuit: () => { void stopStream(); },
         getMode: () => state.controlMode || 'game',
         getTouchMode: touchMode,
+        getTouchDpi: touchDpi,
         textInput: qs('#streamKeyboardInput'),
         keySink: qs('#streamKeySink'),
         blockLocalIme: () => localStorage.getItem('sunbridge.setting.block-local-ime') !== 'false',
@@ -1935,9 +1936,10 @@
       keyboardInput: qs('#streamKeyboardInput'),
       t,
       hydrateIcons,
-      getState: () => ({ controlMode: state.controlMode, touchMode: touchMode(), fullscreen: Boolean(document.fullscreenElement), sticky: state.inputController?.stats.sticky || [] }),
+      getState: () => ({ controlMode: state.controlMode, touchMode: touchMode(), touchDpi: touchDpi(), fullscreen: Boolean(document.fullscreenElement), sticky: state.inputController?.stats.sticky || [] }),
       showKeyboard: showSoftKeyboard,
       setTouchMode,
+      setTouchDpi,
       toggleControlMode,
       toggleFullscreen,
       pressKey: (code) => state.inputController?.pressKey(code),
@@ -2159,6 +2161,15 @@
   const setTouchMode = (mode) => {
     try { localStorage.setItem('sunbridge.setting.touch-mode', mode); } catch { /* storage blocked */ }
     showToast(t(mode === 'trackpad' ? 'touch.trackpad' : 'touch.direct'), t(mode === 'trackpad' ? 'touch.trackpadHint' : 'touch.directHint'));
+  };
+  const touchDpi = () => {
+    let saved = null;
+    try { saved = Number(localStorage.getItem('sunbridge.setting.touch-dpi')); } catch { /* storage blocked */ }
+    return Number.isFinite(saved) ? Math.max(25, Math.min(300, saved)) : 100;
+  };
+  const setTouchDpi = (value) => {
+    const dpi = Math.max(25, Math.min(300, Number(value) || 100));
+    try { localStorage.setItem('sunbridge.setting.touch-dpi', String(dpi)); } catch { /* storage blocked */ }
   };
   // Adaptive streams: follow the window, or keep the current resolution (a window being dragged around
   // would otherwise make the host switch modes again and again).

@@ -97,7 +97,7 @@
   // getTouchMode(): how touches drive the host's mouse in desktop mode - 'direct' (the cursor goes where the
   // finger is) or 'trackpad' (the screen is a laptop trackpad: drag moves the cursor, tap clicks).
   // blockLocalIme(): whether raw keys go through keySink (a setting; off = focus on the canvas as before).
-  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', getTouchMode = () => 'direct', textInput = null, keySink = null, blockLocalIme = () => true, beforePaste = null } = {}) {
+  function createInputController({ canvas, send, isEnabled = () => true, onStateChange, shouldCapturePointer = () => true, onQuit, getMode = () => 'game', getTouchMode = () => 'direct', getTouchDpi = () => 100, textInput = null, keySink = null, blockLocalIme = () => true, beforePaste = null } = {}) {
     if (!canvas || typeof send !== 'function') throw new TypeError('createInputController needs a canvas and a send function');
     const pressedKeys = new Map(); // code -> vk
     const pressedButtons = new Set();
@@ -365,7 +365,8 @@
       const height = Number(canvas.dataset.videoHeight) || canvas.height || 1;
       const scale = 1 / (Math.min(rect.width / width, rect.height / height) || 1);
       const speed = Math.hypot(dx, dy) / Math.max(dt, 1); // CSS px per ms
-      const gain = scale * Math.min(3, 1.2 + speed * 0.9);
+      const dpi = Math.max(25, Math.min(300, Number(getTouchDpi()) || 100)) / 100;
+      const gain = scale * dpi * Math.min(3, 1.2 + speed * 0.9);
       relRemainderX += dx * gain;
       relRemainderY += dy * gain;
       const x = Math.trunc(relRemainderX);
