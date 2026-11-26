@@ -1778,6 +1778,8 @@
         socketClosed = true;
         clearTimeout(rtcRestartTimer);
         rtcRestartTimer = null;
+        clearTimeout(fallbackMediaTimer);
+        fallbackMediaTimer = null;
         window.removeEventListener('online', onNetworkResume);
         document.removeEventListener('visibilitychange', onVisibilityChange);
         socket.readyState = 2;
@@ -1790,6 +1792,8 @@
       socketClosed = true;
       clearTimeout(rtcRestartTimer);
       rtcRestartTimer = null;
+      clearTimeout(fallbackMediaTimer);
+      fallbackMediaTimer = null;
       window.removeEventListener('online', onNetworkResume);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       socket.readyState = 3;
@@ -1808,6 +1812,7 @@
     let rtcRestartTimer = null;
     let rtcReconnectAttempt = 0;
     let socketClosed = false;
+    let fallbackMediaTimer = null;
     const sendJson = (value) => { if (socket.readyState === 1) worker.postMessage({ type: 'send', data: JSON.stringify(value) }); };
     const transport = (state, reason = null) => callbacks.onTransport?.({ state, reason });
     const onNetworkResume = () => {
@@ -1822,11 +1827,22 @@
       if (!webrtc || socketClosed || socket.readyState !== 1 || rtcRestartTimer || rtcStartInFlight) return;
       const delay = RTC_RECONNECT_DELAYS_MS[Math.min(rtcReconnectAttempt, RTC_RECONNECT_DELAYS_MS.length - 1)];
       rtcReconnectAttempt += 1;
-      transport('connecting', reason);
       rtcRestartTimer = setTimeout(() => {
         rtcRestartTimer = null;
         if (!socketClosed && socket.readyState === 1 && !rtc) void startRtc();
       }, delay);
+    };
+    const armFallbackWatchdog = () => {
+      clearTimeout(fallbackMediaTimer);
+      fallbackMediaTimer = setTimeout(() => {
+        fallbackMediaTimer = null;
+        if (socketClosed || socket.readyState !== 1 || rtc) return;
+        sendJson({ type: 'request-idr' });
+        fallbackMediaTimer = setTimeout(() => {
+          fallbackMediaTimer = null;
+          if (!socketClosed && socket.readyState === 1 && !rtc) socket.close(4002, 'media fallback timeout');
+        }, 6000);
+      }, 3000);
     };
     function stopRtc(reason, tellBridge = true) {
       if (!rtc) return;
@@ -1837,6 +1853,7 @@
       try { current.pc.close(); } catch { /* closed */ }
       if (tellBridge) sendJson({ type: 'webrtc-close', reason });
       transport('websocket', reason);
+      armFallbackWatchdog();
       if (!['closed', 'unsupported', 'unavailable'].includes(reason)) scheduleRtcRestart(reason);
     }
     async function startRtc() {
@@ -1901,7 +1918,10 @@
       try { message = JSON.parse(text); } catch { return; }
       if (message.type === 'media-ready') {
         if (message.webrtc?.available) void startRtc();
-        else transport('websocket', message.webrtc?.reason || 'unavailable');
+        else {
+          transport('websocket', message.webrtc?.reason || 'unavailable');
+          armFallbackWatchdog();
+        }
       } else if (message.type === 'webrtc-answer' && rtc) {
         const current = rtc;
         current.pc.setRemoteDescription({ type: 'answer', sdp: message.sdp }).catch(() => { if (rtc === current) stopRtc('answer-rejected'); });
@@ -1922,9 +1942,11 @@
             clearTimeout(current.disconnectTimer);
             try { current.pc.close(); } catch { /* closed */ }
             transport('websocket', reason);
+            armFallbackWatchdog();
           } else stopRtc(reason, false);
         } else if (message.type === 'webrtc-closed') {
           transport('websocket', reason);
+          armFallbackWatchdog();
           scheduleRtcRestart(reason);
         } else transport('websocket', reason);
       }
@@ -1937,7 +1959,11 @@
           if (message.data.includes('"media-ready"') || message.data.includes('"webrtc-')) rtcMessage(message.data);
           socket.onmessage?.({ data: message.data });
           break;
-        case 'socket-media': socket.onmessage?.({ data: message.audio || new ArrayBuffer(0), meta: { bytes: message.bytes, receivedAt: message.receivedAt, arrivedAt: message.arrivedAt } }); break;
+        case 'socket-media':
+          clearTimeout(fallbackMediaTimer);
+          fallbackMediaTimer = null;
+          socket.onmessage?.({ data: message.audio || new ArrayBuffer(0), meta: { bytes: message.bytes, receivedAt: message.receivedAt, arrivedAt: message.arrivedAt } });
+          break;
         case 'socket-error': socket.onerror?.({}); break;
         case 'socket-close': closed({ code: message.code, reason: message.reason, wasClean: message.wasClean }); break;
         case 'video-stats': {
