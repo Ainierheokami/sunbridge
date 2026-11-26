@@ -2041,6 +2041,13 @@ class MediaGatewayClient {
         this.wantsAudio = message.audio !== false;
         this.wantsVideo = message.video !== false;
         this.group = typeof message.group === 'string' ? message.group.slice(0, 64) : null;
+        if (this.wantsFrames && this.wantsVideo) {
+          // A browser that just moved between Wi-Fi and cellular may have
+          // joined in the middle of a frame chain. Start this socket at an
+          // IDR instead of leaving its decoder waiting on delta frames.
+          this.skipToKeyframe = true;
+          if (activeSession === this.session) requestIdrFrame(this.session);
+        }
       } else if (message?.type === 'input') {
         handleBrowserInput(this.session, message);
       } else if (message?.type === 'webrtc-offer' && typeof message.sdp === 'string') {

@@ -344,6 +344,7 @@
         gateway.state = 'connected';
         // frames: whole video frames assembled by the bridge (no FEC parity / RTP headers over this link).
         gateway.send({ type: 'subscribe', sessionId: sessionId || null, frames: true, ...(video?.subscribe || {}) });
+        if (video?.canvas) gateway.send({ type: 'request-idr' });
         onOpen?.({ protocol: gateway.socket.protocol || 'sunbridge-media-v1', sessionId: sessionId || null });
       };
       // Hot path (thousands of packets per second): stay synchronous for ArrayBuffer data.
