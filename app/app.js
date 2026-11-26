@@ -1447,21 +1447,53 @@
   };
 
   const STALL_NOTICE_MS = 3000;
+  // No media at all for this long (doubling after each try that brought nothing back, up to the cap) with the
+  // socket still looking open: rebuild the gateway. A network switch can leave the socket half dead (pongs
+  // still arriving through a proxy, or media on a WebRTC path that died) and nothing else notices.
+  const STALL_RECONNECT_MS = 8000;
+  const STALL_RECONNECT_MAX_MS = 60000;
   const checkStall = () => {
     const now = performance.now();
     if (state.net.packets !== state.stallPackets) {
       state.stallPackets = state.net.packets;
       state.lastMediaAt = now;
+      state.stallReconnects = 0;
       if (state.reconnect?.source === 'stall') { state.reconnect = null; renderReconnect(); }
       return;
     }
     const silentMs = now - (state.lastMediaAt || now);
-    if (silentMs >= STALL_NOTICE_MS && state.mediaGatewayState === 'connected' && !state.reconnect && state.streamSession) {
+    const connected = state.mediaGatewayState === 'connected' && state.streamSession;
+    const reconnectAfter = Math.min(STALL_RECONNECT_MAX_MS, STALL_RECONNECT_MS * 2 ** (state.stallReconnects || 0));
+    if (connected && silentMs >= reconnectAfter && (!state.reconnect || state.reconnect.source === 'stall')) {
+      state.stallReconnects = (state.stallReconnects || 0) + 1;
+      dropDeadGateway();
+    } else if (silentMs >= STALL_NOTICE_MS && connected && !state.reconnect) {
       state.reconnect = { source: 'stall', since: now - silentMs };
       renderReconnect();
     } else if (state.reconnect?.source === 'stall') {
       renderReconnect();
     }
+  };
+
+  // The media socket is dead but the browser hasn't said so (and may not for minutes: closing a socket whose
+  // network is gone waits on a close handshake that never comes). Tear it down here and reconnect, without
+  // waiting for its close event.
+  const dropDeadGateway = () => {
+    if (state.stopping || !state.streamSession || bridge.isDemo) return;
+    stopMediaGateway();
+    state.mediaGatewayState = 'disconnected';
+    queueStreamRender();
+    scheduleGatewayRetry();
+  };
+
+  // Wi-Fi to mobile data and back: the old socket usually dies without a word. Ping now and, if no pong comes
+  // back soon, reconnect instead of waiting for the normal timeout.
+  const NETWORK_CHANGE_PONG_MS = 3000;
+  const onNetworkChange = () => {
+    if (state.gatewayRetryTimer) { void retryGateway(); return; }
+    if (state.mediaGatewayState !== 'connected') return;
+    state.networkChangedAt = performance.now();
+    sendPing();
   };
 
   // AV1 / HEVC decoding in software that can't hold the frame rate (backlog resets, or decoding slower than
@@ -1494,10 +1526,15 @@
 
   const sendPing = () => {
     if (state.mediaGatewayState !== 'connected') return;
-    // A socket that silently died (laptop sleep, network switch) never fires "close": no pong for 6 s = dead.
-    if (state.lastPongAt && performance.now() - state.lastPongAt > 6000) {
+    // A socket that silently died (laptop sleep, network switch) never fires "close": no pong for 6 s = dead,
+    // or 3 s after the network changed.
+    const now = performance.now();
+    const changedAt = state.networkChangedAt;
+    if (changedAt && state.lastPongAt >= changedAt) state.networkChangedAt = 0;
+    if ((state.lastPongAt && now - state.lastPongAt > 6000) || (state.networkChangedAt && now - state.networkChangedAt > NETWORK_CHANGE_PONG_MS)) {
       state.lastPongAt = 0;
-      state.mediaGateway?.close?.(4000, 'ping timeout');
+      state.networkChangedAt = 0;
+      dropDeadGateway();
       return;
     }
     state.mediaGateway?.send?.({ type: 'ping', id: (state.pingId = (state.pingId || 0) + 1), t: performance.now() });
@@ -2931,7 +2968,8 @@
     void state.clipboardSync.sendDataTransfer(event.dataTransfer);
   });
   // Network back: retry right away instead of waiting for the backoff timer.
-  window.addEventListener('online', () => { if (state.gatewayRetryTimer) void retryGateway(); });
+  window.addEventListener('online', onNetworkChange);
+  navigator.connection?.addEventListener?.('change', onNetworkChange);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !state.streamSession) void refreshActiveSession(); });
 
   // For the interaction test (testbench.js): the same fullscreen / keyboard lock path and probes streams use.

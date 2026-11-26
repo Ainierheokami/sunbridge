@@ -1784,7 +1784,9 @@
         document.removeEventListener('visibilitychange', onVisibilityChange);
         socket.readyState = 2;
         worker.postMessage({ type: 'close', code, reason });
-        terminateTimer = setTimeout(terminate, 2000);
+        // A socket whose network is gone may never finish closing: report it closed anyway, or the page
+        // would wait for a close event that dies with the worker.
+        terminateTimer = setTimeout(() => closed({ code: 1006, reason: reason || 'close timeout', wasClean: false }), 2000);
       },
     };
     const closed = (event) => {
