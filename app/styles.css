@@ -718,7 +718,7 @@ body.is-streaming .app-shell { display: none; }
 .touchbar-fab { display: inline-flex; align-items: center; justify-content: center; width: 3rem; height: 3rem; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 50%; color: #f5f5f7; background: rgba(44, 44, 46, 0.78); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); opacity: 0.72; touch-action: none; -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); transition: opacity 160ms ease; }
 .touchbar-fab:active, .touchbar-fab[aria-expanded="true"], .touchbar.is-dragging .touchbar-fab { opacity: 1; }
 .touchbar-fab svg { width: 1.25rem; height: 1.25rem; }
-.touchbar-menu { position: absolute; display: grid; gap: 0.125rem; width: min(16rem, calc(100vw - 5.5rem)); padding: 0.375rem; border-radius: var(--radius-md); color: #f5f5f7; background: rgba(28, 28, 30, 0.96); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); }
+.touchbar-menu { position: absolute; display: grid; gap: 0.125rem; width: min(16rem, calc(100vw - 5.5rem)); overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; padding: 0.375rem; border-radius: var(--radius-md); color: #f5f5f7; background: rgba(28, 28, 30, 0.96); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); }
 .touchbar[data-side="right"] .touchbar-menu { right: calc(100% + 0.5rem); }
 .touchbar[data-side="left"] .touchbar-menu { left: calc(100% + 0.5rem); }
 .touchbar[data-vertical="down"] .touchbar-menu { top: 0; }
@@ -726,6 +726,9 @@ body.is-streaming .app-shell { display: none; }
 .touchbar-menu > button { display: flex; align-items: center; gap: 0.625rem; min-height: 2.75rem; padding: 0 0.625rem; border: 0; border-radius: var(--radius-sm); color: inherit; background: transparent; font-size: 0.9375rem; text-align: left; }
 .touchbar-menu > button:active { background: rgba(255, 255, 255, 0.1); }
 .touchbar-menu svg { width: 1.125rem; height: 1.125rem; flex: 0 0 auto; color: #a1a1a6; }
+.touchbar-menu > .touchbar-end, .touchbar-menu > .touchbar-end svg { color: #ff6961; }
+.touchbar-menu > .touchbar-end[data-armed] { color: #fff; background: #ff453a; }
+.touchbar-menu > .touchbar-end[data-armed] svg { color: #fff; }
 .touchbar-dpi { display: grid; gap: 0.25rem; padding: 0.5rem 0.625rem 0.375rem; color: #a1a1a6; font-size: 0.8125rem; }
 .touchbar-dpi span { display: flex; justify-content: space-between; gap: 1rem; }
 .touchbar-dpi strong { color: #f5f5f7; font-variant-numeric: tabular-nums; }
@@ -831,6 +834,21 @@ body.is-streaming .app-shell { display: none; }
 .touchbar-floating button { display: grid; justify-items: center; gap: 0.25rem; min-height: 3.25rem; padding: 0.375rem 0.25rem; border: 0; border-radius: var(--radius-sm); color: #d0d0d5; background: rgba(255, 255, 255, 0.08); font-size: 0.75rem; }
 .touchbar-floating button svg { width: 1.25rem; height: 1.25rem; color: inherit; }
 .touchbar-floating button[aria-pressed="true"] { color: #fff; background: #0a84ff; }
+/* Phones held sideways: the height is what's short. */
+@media (max-height: 30rem) and (pointer: coarse) {
+  .stream-shell { grid-template-rows: 2.25rem 1fr 1.5rem; }
+  /* Wider than the phone layout's 680 px, but no room for the labels either. */
+  .stream-header { padding: 0 0.5rem; }
+  .stream-brand span, .stream-session-name, .stream-live, #streamEndLabel, #streamResolutionButton span:last-child { display: none; }
+  .stream-header-actions { gap: 0.25rem; }
+  .stream-mode-button { padding: 0 0.5rem; white-space: nowrap; }
+  .stream-end-button { justify-content: center; padding: 0; }
+  .stream-brand img { width: 1.25rem; height: 1.25rem; }
+  .stream-icon-button, .stream-mode-button, .stream-end-button { height: 1.75rem; min-height: 1.75rem; }
+  .stream-icon-button, .stream-end-button { width: 1.75rem; }
+  .stream-footer { font-size: 0.6875rem; }
+  .stream-hud-bar { padding-top: 0; padding-bottom: 0; }
+}
 /* No hover on touch screens: the fullscreen header can't be revealed and would take blind taps (the touch menu has fullscreen). */
 @media (hover: none) and (pointer: coarse) {
   .stream-overlay:fullscreen .stream-header { pointer-events: none; }
@@ -1079,6 +1097,17 @@ textarea:focus-visible { border-color: var(--accent); }
   .stream-hint, .stream-footer-right > :not(.stream-hud) { display: none; }
   .stream-footer { padding: 0 0.75rem; }
   .stream-hud-detail { width: min(20rem, calc(100vw - 1rem)); }
+  /* Phones: thinner bars, so more of the height goes to the picture. */
+  .stream-shell { grid-template-rows: 2.5rem 1fr 1.75rem; }
+  .stream-brand img { width: 1.25rem; height: 1.25rem; }
+  .stream-icon-button, .stream-mode-button { height: 1.875rem; }
+  .stream-icon-button { width: 1.875rem; }
+  .stream-end-button { width: 1.875rem; min-height: 1.875rem; }
+  .stream-footer { gap: 0.5rem; padding: 0 0.5rem; font-size: 0.75rem; }
+  .stream-hud-bar { gap: 0.5rem; padding: 0.125rem 0.5rem 0.125rem 1.25rem; }
+  .stream-hud-bar::before { left: 0.5rem; width: 0.375rem; height: 0.375rem; }
+  .hud-metric strong { font-size: 0.8125rem; }
+  .hud-metric small { font-size: 0.6875rem; }
   .session-resume-bar { flex-wrap: wrap; }
   .cert-upload-grid { grid-template-columns: minmax(0, 1fr); }
   .access-save { bottom: calc(4.25rem + env(safe-area-inset-bottom)); }

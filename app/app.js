@@ -1989,6 +1989,7 @@
       setVideoZoom,
       toggleControlMode,
       toggleFullscreen,
+      endSession: () => stopStream(),
       pressKey: (code) => state.inputController?.pressKey(code),
       toggleModifier: (code) => state.inputController?.toggleModifier(code),
       clearModifiers: () => state.inputController?.clearModifiers(),

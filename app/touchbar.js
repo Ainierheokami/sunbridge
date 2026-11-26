@@ -1,7 +1,7 @@
 // Touch controls for the stream page on phones and tablets, which have no hover (the fullscreen header only
 // shows on hover) and no Ctrl / Alt / Win / Esc keys:
 //   - a floating button, draggable to either edge, always on top of the stream (fullscreen included); a tap
-//     opens a menu: soft keyboard, the floating PC keyboard / gamepad / mouse (floating.js), touch mode (direct / trackpad), pointer DPI, desktop / game controls, fullscreen;
+//     opens a menu: soft keyboard, the floating PC keyboard / gamepad / mouse (floating.js), touch mode (direct / trackpad), pointer DPI, desktop / game controls, fullscreen, end stream;
 //   - a key bar above the soft keyboard while it is open: Esc, Tab, latched Ctrl / Alt / Shift / Win, arrows
 //     and a few more, sent through the input controller (pressKey / toggleModifier).
 // Shown where the primary pointer is a finger, or once a finger touches the stream (a touchscreen laptop).
@@ -64,7 +64,10 @@
       root.style.right = position.side === 'right' ? 'calc(' + EDGE_PX + 'px + env(safe-area-inset-right))' : '';
       root.dataset.side = position.side;
       // The menu opens towards the middle of the screen, upwards in the lower half.
-      root.dataset.vertical = y > height / 2 ? 'up' : 'down';
+      const up = y > height / 2;
+      root.dataset.vertical = up ? 'up' : 'down';
+      // Room on that side (short in landscape on a phone): the menu scrolls instead of running off the screen.
+      menu.style.maxHeight = Math.max(160, (up ? y + size : height - y) - EDGE_PX) + 'px';
     };
     let drag = null;
     on(fab, 'pointerdown', (event) => {
@@ -107,6 +110,8 @@
       const state = getState();
       const desktop = state.controlMode === 'desktop';
       menu.innerHTML = item('keyboard', 'keyboard', t('touch.keyboard'))
+        + (document.fullscreenEnabled || document.webkitFullscreenEnabled ? item('fullscreen', state.fullscreen ? 'compress' : 'expand', t(state.fullscreen ? 'control.exitFullscreen' : 'touch.fullscreen')) : '')
+        + (options.endSession ? item('end-session', 'x', t(endArmed ? 'touch.endSessionConfirm' : 'touch.endSession'), ' class="touchbar-end"' + (endArmed ? ' data-armed=""' : '')) : '')
         + '<div class="touchbar-floating" role="group" aria-label="' + t('touch.floating') + '"><span>' + t('touch.floating') + '</span><div>'
         + [['keyboard', 'keyboard', 'touch.pcKeyboard'], ['gamepad', 'gamepad', 'touch.gamepad'], ['mouse', 'mouse', 'touch.mouse']].map(([name, icon, label]) => '<button type="button" data-floating-toggle="' + name + '" aria-pressed="' + Boolean(floating?.isOpen(name)) + '"><span data-icon="' + icon + '" aria-hidden="true"></span><span>' + t(label) + '</span></button>').join('')
         + '</div></div>'
@@ -114,13 +119,17 @@
           + `<button type="button" data-touch-mode="direct" aria-pressed="${state.touchMode !== 'trackpad'}">${t('touch.direct')}</button>`
           + `<button type="button" data-touch-mode="trackpad" aria-pressed="${state.touchMode === 'trackpad'}">${t('touch.trackpad')}</button></div></div>` : '')
         + item('control-mode', desktop ? 'gamepad' : 'mouse', t(desktop ? 'touch.toGame' : 'touch.toDesktop'))
-        + (document.fullscreenEnabled ? item('fullscreen', state.fullscreen ? 'compress' : 'expand', t(state.fullscreen ? 'control.exitFullscreen' : 'touch.fullscreen')) : '')
         + `<label class="touchbar-dpi"><span>${t('touch.scale')} <strong>${state.videoZoom}%</strong></span><input type="range" min="100" max="350" step="25" value="${state.videoZoom}" data-touch-scale aria-label="${t('touch.scale')}"></label>`
         + (desktop ? `<label class="touchbar-dpi"><span>${t('touch.dpi')} <strong>${state.touchDpi}%</strong></span><input type="range" min="25" max="300" step="5" value="${state.touchDpi}" data-touch-dpi aria-label="${t('touch.dpi')}"></label><p class="touchbar-hint">${t(state.touchMode === 'trackpad' ? 'touch.trackpadHint' : 'touch.directHint')}</p>` : '');
       hydrateIcons(menu);
     };
-    const openMenu = () => { renderMenu(); menu.hidden = false; fab.setAttribute('aria-expanded', 'true'); };
-    const closeMenu = () => { menu.hidden = true; fab.setAttribute('aria-expanded', 'false'); };
+    // Ending the stream takes a second tap within a few seconds: the menu sits over the video, a stray tap
+    // shouldn't end the session.
+    let endArmed = false;
+    let endArmTimer = null;
+    const disarmEnd = () => { clearTimeout(endArmTimer); endArmTimer = null; endArmed = false; };
+    const openMenu = () => { disarmEnd(); renderMenu(); menu.hidden = false; fab.setAttribute('aria-expanded', 'true'); };
+    const closeMenu = () => { disarmEnd(); menu.hidden = true; fab.setAttribute('aria-expanded', 'false'); };
     const toggleMenu = () => { if (menu.hidden) openMenu(); else closeMenu(); };
     // The floating keyboard, gamepad and mouse (floating.js). Opening one puts the soft keyboard away.
     const floating = window.SunbridgeFloating?.createFloatingControls({
@@ -160,11 +169,18 @@
       if (mode) { options.setTouchMode(mode); renderMenu(); return; }
       const action = event.target.closest('[data-touch-action]')?.dataset.touchAction;
       if (!action) return;
+      if (action === 'end-session' && !endArmed) {
+        endArmed = true;
+        renderMenu();
+        endArmTimer = setTimeout(() => { disarmEnd(); if (!menu.hidden) renderMenu(); }, 3000);
+        return;
+      }
       closeMenu();
       // Synchronous in the tap: iOS only opens the keyboard for a focus() made during a user gesture.
       if (action === 'keyboard') options.showKeyboard();
       else if (action === 'control-mode') options.toggleControlMode();
       else if (action === 'fullscreen') void options.toggleFullscreen();
+      else if (action === 'end-session') void options.endSession();
     });
     // A touch anywhere else closes the menu.
     on(document, 'pointerdown', (event) => { if (!menu.hidden && !root.contains(event.target)) closeMenu(); }, true);
