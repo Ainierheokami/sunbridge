@@ -1551,10 +1551,12 @@ function broadcastFrame(session, runtime, frame) {
       client.droppedFrames = (client.droppedFrames || 0) + 1;
       client.framesLostSinceSent = (client.framesLostSinceSent || 0) + 1;
       if (!client.skipToKeyframe) { client.skipToKeyframe = true; }
+      if (client.skipToKeyframe) client.armKeyframeRetry();
       if (!client.draining) requestIdrThrottled(session, runtime);
       continue;
     }
     client.skipToKeyframe = false;
+    client.clearKeyframeRetry();
     const header = Buffer.allocUnsafe(16);
     header.write('SBMF', 0, 4, 'ascii');
     header[4] = 1;
@@ -1572,6 +1574,7 @@ function stopDraining(client) {
   if (!client.draining) return;
   client.draining = 0;
   if (activeSession === client.session) requestIdrFrame(client.session);
+  if (client.skipToKeyframe) client.armKeyframeRetry();
 }
 
 function backpressureLimit(session) {
@@ -1872,6 +1875,7 @@ class MediaGatewayClient {
     this.mediaBatchBytes = 0;
     this.mediaAudioCount = 0;
     this.mediaFlushScheduled = false;
+    this.keyframeRetryTimer = null;
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 10000);
     socket.on('data', (chunk) => this.handleData(chunk));
@@ -2046,7 +2050,7 @@ class MediaGatewayClient {
           // joined in the middle of a frame chain. Start this socket at an
           // IDR instead of leaving its decoder waiting on delta frames.
           this.skipToKeyframe = true;
-          if (activeSession === this.session) requestIdrFrame(this.session);
+          this.armKeyframeRetry();
         }
       } else if (message?.type === 'input') {
         handleBrowserInput(this.session, message);
@@ -2090,8 +2094,26 @@ class MediaGatewayClient {
     if (this.closeNotified) return;
     this.closeNotified = true;
     this.closed = true;
+    this.clearKeyframeRetry();
     this.stopRtc('closed');
     removeMediaGatewayClient(this);
+  }
+
+  armKeyframeRetry() {
+    if (this.keyframeRetryTimer || !this.skipToKeyframe || this.closed) return;
+    const retry = () => {
+      this.keyframeRetryTimer = null;
+      if (this.closed || !this.skipToKeyframe || activeSession !== this.session) return;
+      requestIdrFrame(this.session);
+      this.keyframeRetryTimer = setTimeout(retry, 1000);
+      this.keyframeRetryTimer.unref?.();
+    };
+    retry();
+  }
+
+  clearKeyframeRetry() {
+    clearTimeout(this.keyframeRetryTimer);
+    this.keyframeRetryTimer = null;
   }
 
   // The browser offers WebRTC (it creates the DataChannels); answered over this socket. Media moves to the
@@ -2151,7 +2173,7 @@ class MediaGatewayClient {
     this.flushMedia();
     // Start the DataChannel path on a keyframe.
     this.skipToKeyframe = true;
-    if (activeSession === this.session) requestIdrFrame(this.session);
+    this.armKeyframeRetry();
     this.sendJson({ type: 'webrtc-active' });
     LOG.info('stream', 'webrtc', `浏览器媒体改走 WebRTC（UDP 端口 ${this.rtcStatus.port}）`);
   }
@@ -2190,7 +2212,7 @@ class MediaGatewayClient {
     // Back on the WebSocket from the next keyframe.
     if (rtc.ready) {
       this.skipToKeyframe = true;
-      if (activeSession === this.session) requestIdrFrame(this.session);
+      this.armKeyframeRetry();
     }
   }
 }
