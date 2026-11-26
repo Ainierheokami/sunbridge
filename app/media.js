@@ -1781,6 +1781,7 @@
         clearTimeout(fallbackMediaTimer);
         fallbackMediaTimer = null;
         window.removeEventListener('online', onNetworkResume);
+        navigator.connection?.removeEventListener?.('change', onNetworkResume);
         document.removeEventListener('visibilitychange', onVisibilityChange);
         socket.readyState = 2;
         worker.postMessage({ type: 'close', code, reason });
@@ -1797,6 +1798,7 @@
       clearTimeout(fallbackMediaTimer);
       fallbackMediaTimer = null;
       window.removeEventListener('online', onNetworkResume);
+      navigator.connection?.removeEventListener?.('change', onNetworkResume);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       socket.readyState = 3;
       stopRtc('closed', false);
@@ -1813,20 +1815,30 @@
     let rtcStartInFlight = false;
     let rtcRestartTimer = null;
     let rtcReconnectAttempt = 0;
+    // Restarted only after it has worked on this socket: a UDP port that was never reachable stays on the
+    // WebSocket instead of a new attempt every few seconds. A network change resets the count.
+    const RTC_MAX_RESTARTS = 6;
+    let rtcWorked = false;
     let socketClosed = false;
     let fallbackMediaTimer = null;
     const sendJson = (value) => { if (socket.readyState === 1) worker.postMessage({ type: 'send', data: JSON.stringify(value) }); };
     const transport = (state, reason = null) => callbacks.onTransport?.({ state, reason });
     const onNetworkResume = () => {
-      if (!rtc || socketClosed) return;
+      if (socketClosed) return;
+      if (!rtc) {
+        // Gave up earlier: the new network may let it through.
+        if (rtcWorked && !rtcRestartTimer && rtcReconnectAttempt >= RTC_MAX_RESTARTS) { rtcReconnectAttempt = 0; scheduleRtcRestart('network-change'); }
+        return;
+      }
       const state = rtc.pc.iceConnectionState;
-      if (state === 'disconnected' || state === 'failed') stopRtc('network-change');
+      if (state === 'disconnected' || state === 'failed') { rtcReconnectAttempt = 0; stopRtc('network-change'); }
     };
     const onVisibilityChange = () => { if (document.visibilityState === 'visible') onNetworkResume(); };
     window.addEventListener('online', onNetworkResume);
+    navigator.connection?.addEventListener?.('change', onNetworkResume);
     document.addEventListener('visibilitychange', onVisibilityChange);
     const scheduleRtcRestart = (reason) => {
-      if (!webrtc || socketClosed || socket.readyState !== 1 || rtcRestartTimer || rtcStartInFlight) return;
+      if (!webrtc || !rtcWorked || rtcReconnectAttempt >= RTC_MAX_RESTARTS || socketClosed || socket.readyState !== 1 || rtcRestartTimer || rtcStartInFlight) return;
       const delay = RTC_RECONNECT_DELAYS_MS[Math.min(rtcReconnectAttempt, RTC_RECONNECT_DELAYS_MS.length - 1)];
       rtcReconnectAttempt += 1;
       rtcRestartTimer = setTimeout(() => {
@@ -1931,6 +1943,7 @@
         clearTimeout(rtc.timer);
         clearTimeout(rtc.disconnectTimer);
         rtcReconnectAttempt = 0;
+        rtcWorked = true;
         clearTimeout(rtcRestartTimer);
         rtcRestartTimer = null;
         transport('webrtc');

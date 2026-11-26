@@ -1449,8 +1449,10 @@
   const STALL_NOTICE_MS = 3000;
   // No media at all for this long (doubling after each try that brought nothing back, up to the cap) with the
   // socket still looking open: rebuild the gateway. A network switch can leave the socket half dead (pongs
-  // still arriving through a proxy, or media on a WebRTC path that died) and nothing else notices.
-  const STALL_RECONNECT_MS = 8000;
+  // still arriving through a proxy, or media on a WebRTC path that died) and nothing else notices. Longer than
+  // the 12 s a disconnected WebRTC path is given to recover (media.js RTC_DISCONNECTED_GRACE_MS); a dead
+  // socket is caught sooner by the ping.
+  const STALL_RECONNECT_MS = 15000;
   const STALL_RECONNECT_MAX_MS = 60000;
   const checkStall = () => {
     const now = performance.now();
@@ -2226,12 +2228,10 @@
   const syncFloatingButtons = () => {
     qsa('[data-action="toggle-floating"]').forEach((button) => button.setAttribute('aria-pressed', String(Boolean(state.touchBar?.isPanelOpen?.(button.dataset.panel)))));
   };
-  const savedDisplayScale = () => {
-    let saved = null;
-    try { saved = Number(localStorage.getItem('sunbridge.setting.stream-scale') ?? NaN); } catch { /* storage blocked */ }
-    return Number.isFinite(saved) ? Math.max(100, Math.min(350, saved)) : null;
-  };
-  const videoZoom = () => savedDisplayScale() ?? state.displayScale.current ?? 100;
+  // The slider shows the host's own Windows display scale and changes it only when moved: nothing is kept in
+  // this browser and pushed back at the next stream. (sunbridge.setting.stream-scale was the old picture zoom,
+  // 50-150 %; it must not be read as a DPI.)
+  const videoZoom = () => state.displayScale.current ?? 100;
   const nearestDisplayScale = (value) => {
     const values = state.displayScale.supported?.length ? state.displayScale.supported : [100, 125, 150, 175, 200, 225, 250, 300, 350];
     return values.reduce((best, item) => Math.abs(item - value) < Math.abs(best - value) ? item : best, values[0]);
@@ -2250,7 +2250,6 @@
   };
   const queueDisplayScale = (value) => {
     const scale = nearestDisplayScale(Number(value) || 100);
-    try { localStorage.setItem('sunbridge.setting.stream-scale', String(scale)); } catch { /* storage blocked */ }
     state.displayScale.current = scale;
     updateDisplayScaleControl();
     if (!state.streamHost || bridge.isDemo) return;
@@ -2281,10 +2280,8 @@
       state.displayScale.displayName = options.display_name || state.displayScale.displayName || null;
       state.displayScale.deviceId = options.device_id || state.displayScale.deviceId || null;
       const current = Number(options.current_scale_percent);
-      const saved = savedDisplayScale();
       state.displayScale.current = Number.isInteger(current) ? current : state.displayScale.current;
       updateDisplayScaleControl();
-      if (saved != null && Number.isInteger(current) && nearestDisplayScale(saved) !== current) queueDisplayScale(saved);
     } catch {
       updateDisplayScaleControl();
     }

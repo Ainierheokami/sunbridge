@@ -2104,7 +2104,8 @@ class MediaGatewayClient {
     const retry = () => {
       this.keyframeRetryTimer = null;
       if (this.closed || !this.skipToKeyframe || activeSession !== this.session) return;
-      requestIdrFrame(this.session);
+      // Draining: a keyframe would only add to the backlog; stopDraining asks for one when it ends.
+      if (!this.draining) requestIdrFrame(this.session);
       this.keyframeRetryTimer = setTimeout(retry, 1000);
       this.keyframeRetryTimer.unref?.();
     };

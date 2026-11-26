@@ -32,8 +32,9 @@ importScripts('media.js');
   const postStats = () => {
     if (pipeline) post({ type: 'video-stats', stats: pipeline.stats });
     if (audioPipeline) post({ type: 'audio-stats', stats: audioPipeline.stats });
-    if (rtcReassembler.stats.recovered !== rtcRecoveredSent) {
-      rtcRecoveredSent = rtcReassembler.stats.recovered;
+    const recovered = rtcRecoveredBefore + rtcReassembler.stats.recovered;
+    if (recovered !== rtcRecoveredSent) {
+      rtcRecoveredSent = recovered;
       post({ type: 'rtc-stats', recovered: rtcRecoveredSent });
     }
   };
@@ -116,10 +117,17 @@ importScripts('media.js');
   let rtcExpected = null;
   let rtcBytes = 0; // fragment bytes not yet reported
   let rtcTimer = null;
-  const rtcReassembler = Media.createRtcReassembler({ isStale: (sequence) => rtcExpected != null && seqBefore(sequence, rtcExpected) });
+  let rtcReassembler = Media.createRtcReassembler({ isStale: (sequence) => rtcExpected != null && seqBefore(sequence, rtcExpected) });
   let rtcRecoveredSent = 0;
+  let rtcRecoveredBefore = 0;
 
   function attachRtc({ video, audio: audioChannel }) {
+    // Every connection numbers its frames from the start again (server.mjs startRtc): forget the last one's
+    // sequence, or each new frame would look older than it and be dropped.
+    rtcReady.clear();
+    rtcExpected = null;
+    rtcRecoveredBefore += rtcReassembler.stats.recovered; // the count shown covers every connection
+    rtcReassembler = Media.createRtcReassembler({ isStale: (sequence) => rtcExpected != null && seqBefore(sequence, rtcExpected) });
     for (const channel of [video, audioChannel]) channel.binaryType = 'arraybuffer';
     video.onmessage = (event) => onVideoFragment(event.data);
     audioChannel.onmessage = (event) => {
